@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from ortools.linear_solver import pywraplp
@@ -118,7 +119,8 @@ def optimize_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0):
 st.title("탄소배출량 계산 및 최적화 데모")
 st.write("이 단계에서는 샘플 CSV 데이터를 바탕으로 기준안 계산과 OR-Tools 최적화를 수행합니다.")
 
-csv_path = "data/sample_energy_options.csv"
+BASE_DIR = Path(__file__).resolve().parent
+csv_path = BASE_DIR / "data" / "sample_energy_options.csv"
 df = pd.read_csv(csv_path)
 
 # 기준안 계산
