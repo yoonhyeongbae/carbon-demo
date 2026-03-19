@@ -1,0 +1,7 @@
+site,source,baseline_use_mwh,min_use_mwh,max_use_mwh,emission_factor_tco2_per_mwh,cost_per_mwh
+Site_A,Grid,120,50,160,0.45,100
+Site_A,Gas,80,20,120,0.28,120
+Site_A,Solar_PPA,20,0,80,0.05,145
+Site_B,Grid,90,40,150,0.45,100
+Site_B,Gas,60,10,100,0.28,120
+Site_B,Solar_PPA,10,0,70,0.05,145
