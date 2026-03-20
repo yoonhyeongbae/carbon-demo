@@ -5,10 +5,50 @@ from ortools.linear_solver import pywraplp
 
 st.set_page_config(page_title="탄소배출량 계산 및 최적화 데모", layout="wide")
 
+REQUIRED_COLS = [
+    "site",
+    "source",
+    "baseline_use_mwh",
+    "min_use_mwh",
+    "max_use_mwh",
+    "emission_factor_tco2_per_mwh",
+    "cost_per_mwh",
+]
+
+
+def validate_input_df(df: pd.DataFrame):
+    missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
+    if missing_cols:
+        return False, f"필수 컬럼이 없습니다: {', '.join(missing_cols)}"
+
+    numeric_cols = [
+        "baseline_use_mwh",
+        "min_use_mwh",
+        "max_use_mwh",
+        "emission_factor_tco2_per_mwh",
+        "cost_per_mwh",
+    ]
+
+    # 숫자형 변환
+    df = df.copy()
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if df[numeric_cols].isnull().any().any():
+        return False, "숫자 컬럼에 비어 있거나 숫자가 아닌 값이 있습니다."
+
+    if (df["min_use_mwh"] > df["max_use_mwh"]).any():
+        return False, "min_use_mwh가 max_use_mwh보다 큰 행이 있습니다."
+
+    if (df[numeric_cols] < 0).any().any():
+        return False, "숫자 컬럼에 음수가 있습니다."
+
+    return True, "입력 데이터 검증 완료"
+
 
 def optimize_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0):
     """
-    아주 단순한 선형 최적화 모형
+    단순 선형 최적화 모형
     목적: 총 탄소배출량 최소화
     제약:
     1) 사업장별 총 사용량은 기준안과 동일
@@ -19,7 +59,6 @@ def optimize_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0):
     if solver is None:
         return {"status": "SOLVER_NOT_CREATED"}
 
-    # 의사결정변수 생성
     x = {}
     for idx, row in df.iterrows():
         x[idx] = solver.NumVar(
@@ -28,13 +67,13 @@ def optimize_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0):
             f"x_{idx}_{row['site']}_{row['source']}"
         )
 
-    # 사업장별 총 수요 유지 제약
+    # 사업장별 총 수요 유지
     site_demands = df.groupby("site")["baseline_use_mwh"].sum()
     for site, demand in site_demands.items():
         idxs = df.index[df["site"] == site]
         solver.Add(sum(x[i] for i in idxs) == float(demand))
 
-    # 총비용 증가 제한 제약
+    # 총비용 증가 제한
     baseline_total_cost = float((df["baseline_use_mwh"] * df["cost_per_mwh"]).sum())
     max_allowed_cost = baseline_total_cost * (1 + budget_increase_pct / 100.0)
     solver.Add(
@@ -113,17 +152,36 @@ def optimize_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0):
     }
 
 
-# ----------------------------
-# 1. 데이터 읽기
-# ----------------------------
 st.title("탄소배출량 계산 및 최적화 데모")
-st.write("이 단계에서는 샘플 CSV 데이터를 바탕으로 기준안 계산과 OR-Tools 최적화를 수행합니다.")
+st.write("이 단계에서는 사용자가 업로드한 CSV 또는 샘플 CSV를 바탕으로 기준안 계산과 OR-Tools 최적화를 수행합니다.")
+
+# ----------------------------
+# 1. 데이터 입력
+# ----------------------------
+st.subheader("1. 데이터 입력")
+
+uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
 
 BASE_DIR = Path(__file__).resolve().parent
-csv_path = BASE_DIR / "data" / "sample_energy_options.csv"
-df = pd.read_csv(csv_path)
+sample_csv_path = BASE_DIR / "data" / "sample_energy_options.csv"
 
-# 기준안 계산
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+    st.info("현재 업로드한 CSV 파일을 사용 중입니다.")
+else:
+    df = pd.read_csv(sample_csv_path)
+    st.info("현재 샘플 CSV 데이터를 사용 중입니다. 사용자가 CSV를 업로드하면 그 파일로 계산합니다.")
+
+is_valid, msg = validate_input_df(df)
+if not is_valid:
+    st.error(msg)
+    st.stop()
+else:
+    st.success(msg)
+
+# ----------------------------
+# 2. 기준안 계산
+# ----------------------------
 df["baseline_emissions_tco2"] = (
     df["baseline_use_mwh"] * df["emission_factor_tco2_per_mwh"]
 )
@@ -139,10 +197,7 @@ total_use = float(site_summary_baseline["baseline_use_mwh"].sum())
 total_emissions = float(site_summary_baseline["baseline_emissions_tco2"].sum())
 total_cost = float(site_summary_baseline["baseline_cost"].sum())
 
-# ----------------------------
-# 2. 기준안 표시
-# ----------------------------
-st.subheader("기준안 요약")
+st.subheader("2. 기준안 요약")
 col1, col2, col3 = st.columns(3)
 col1.metric("총 사용량 (MWh)", f"{total_use:.2f}")
 col2.metric("총 탄소배출량 (tCO2)", f"{total_emissions:.2f}")
@@ -167,9 +222,9 @@ st.subheader("사업장별 기준 탄소배출량")
 st.bar_chart(baseline_chart)
 
 # ----------------------------
-# 3. 최적화 조건 입력
+# 3. 최적화 조건
 # ----------------------------
-st.subheader("최적화 조건")
+st.subheader("3. 최적화 조건")
 budget_increase_pct = st.slider(
     "허용 총비용 증가율 (%)",
     min_value=0,
@@ -181,12 +236,12 @@ budget_increase_pct = st.slider(
 run_opt = st.button("최적화 실행")
 
 # ----------------------------
-# 4. 최적화 실행 및 결과 표시
+# 4. 최적화 결과
 # ----------------------------
 if run_opt:
     result = optimize_emissions(df, budget_increase_pct=budget_increase_pct)
 
-    st.subheader("최적화 결과 상태")
+    st.subheader("4. 최적화 결과 상태")
     st.write(f"상태: **{result['status']}**")
 
     if result["status"] not in ["OPTIMAL", "FEASIBLE"]:
