@@ -1,4 +1,3 @@
-from io import StringIO
 import math
 import hashlib
 import pandas as pd
@@ -10,7 +9,7 @@ from ortools.linear_solver import pywraplp
 st.set_page_config(page_title="공급망 기반 탄소배출량 최적화 데모", layout="wide")
 
 # ============================================================
-# 1. 기본 상수 / 가정 데이터
+# 1. 기본 설정
 # ============================================================
 REQUIRED_COLS = [
     "scope",
@@ -30,81 +29,81 @@ OPTIONAL_COLS = [
     "usage_location",
     "procurement_region",
     "route_id",
+    "sequence_no",
     "origin",
     "destination",
     "quantity_ton",
     "distance_km",
     "transport_mode",
+    "origin_lat",
+    "origin_lon",
+    "destination_lat",
+    "destination_lon",
 ]
 
 SCOPE_LIST = ["Scope1", "Scope2", "Scope3"]
 
-# 노드(지도용) - 임의 가정
-NODES_DF = pd.DataFrame([
-    {"node": "Plant_A", "node_type": "Plant", "lat": 37.2636, "lon": 127.0286},       # 수원 근처
-    {"node": "Plant_B", "node_type": "Plant", "lat": 35.1796, "lon": 129.0756},       # 부산
+# 정적 사업장/창고 노드 (Scope1/2용)
+STATIC_NODES_DF = pd.DataFrame([
+    {"node": "Plant_A", "node_type": "Plant", "lat": 37.2636, "lon": 127.0286},        # Suwon
+    {"node": "Plant_B", "node_type": "Plant", "lat": 35.1796, "lon": 129.0756},        # Busan
     {"node": "Warehouse_Seoul", "node_type": "Warehouse", "lat": 37.5665, "lon": 126.9780},
     {"node": "Warehouse_Daejeon", "node_type": "Warehouse", "lat": 36.3504, "lon": 127.3845},
-    {"node": "Supplier_Incheon", "node_type": "Supplier", "lat": 37.4563, "lon": 126.7052},
-    {"node": "Supplier_Pohang", "node_type": "Supplier", "lat": 36.0190, "lon": 129.3435},
-    {"node": "Port_Busan", "node_type": "Port", "lat": 35.1053, "lon": 129.0403},
-    {"node": "Customer_Daegu", "node_type": "Customer", "lat": 35.8714, "lon": 128.6014},
-    {"node": "Customer_Gwangju", "node_type": "Customer", "lat": 35.1595, "lon": 126.8526},
 ])
-
-NODE_TYPE_COLOR = {
-    "Plant": "red",
-    "Warehouse": "blue",
-    "Supplier": "green",
-    "Port": "purple",
-    "Customer": "orange",
-}
 
 PLANT_NODES = ["Plant_A", "Plant_B"]
 WAREHOUSE_NODES = ["Warehouse_Seoul", "Warehouse_Daejeon"]
-SUPPLIER_NODES = ["Supplier_Incheon", "Supplier_Pohang"]
-CUSTOMER_NODES = ["Customer_Daegu", "Customer_Gwangju"]
-ALL_NODE_NAMES = NODES_DF["node"].tolist()
+
+SITE_COORDS = {
+    "Plant_A": (37.2636, 127.0286),
+    "Plant_B": (35.1796, 129.0756),
+    "Warehouse_Seoul": (37.5665, 126.9780),
+    "Warehouse_Daejeon": (36.3504, 127.3845),
+}
 
 SITE_DEFAULTS = {
     "Plant_A": {"boiler_demand": 120.0, "fleet_demand": 40.0, "power_demand": 180.0},
     "Plant_B": {"boiler_demand": 90.0, "fleet_demand": 35.0, "power_demand": 160.0},
 }
 
-# Scope 1 가정 데이터
+# Scope 1
 SCOPE1_BOILER_OPTIONS = {
     "Natural_Gas": {"ef": 0.22, "cost": 55, "unit": "MWh", "desc": "보일러 열원"},
     "LPG": {"ef": 0.27, "cost": 68, "unit": "MWh", "desc": "보일러 열원"},
     "Biomethane": {"ef": 0.06, "cost": 92, "unit": "MWh", "desc": "보일러 열원"},
 }
-
 SCOPE1_FLEET_OPTIONS = {
     "Diesel_Fleet": {"ef": 0.27, "cost": 60, "unit": "MWh", "desc": "사내차량 연료"},
     "LNG_Fleet": {"ef": 0.18, "cost": 72, "unit": "MWh", "desc": "사내차량 연료"},
     "EV_Fleet": {"ef": 0.05, "cost": 95, "unit": "MWh", "desc": "사내차량 전동화"},
 }
 
-# Scope 2 가정 데이터
+# Scope 2
 GRID_REGION_META = {
     "Region_A": {"ef": 0.48, "cost": 98},
     "Region_B": {"ef": 0.38, "cost": 106},
 }
 SOLAR_META = {"ef": 0.02, "cost": 135}
 
-# Scope 3 가정 데이터
+# Scope 3
 TRANSPORT_MODE_META = {
     "Truck": {"ef": 0.00018, "cost": 1.20, "unit": "ton-km"},
     "Rail": {"ef": 0.00006, "cost": 1.55, "unit": "ton-km"},
     "Ship": {"ef": 0.00004, "cost": 1.50, "unit": "ton-km"},
 }
-
 TRANSPORT_MODE_COLOR = {
     "Truck": "blue",
     "Rail": "green",
     "Ship": "purple",
 }
 
-# 컬럼 설명
+NODE_TYPE_COLOR = {
+    "Plant": "red",
+    "Warehouse": "blue",
+    "Owner": "black",
+    "Client": "orange",
+}
+
 GUIDE_DF = pd.DataFrame(
     [
         ["scope", "문자", "Scope1 / Scope2 / Scope3", "배출 범주"],
@@ -127,29 +126,44 @@ ACTIVITY_GROUP_GUIDE_DF = pd.DataFrame(
         ["Boiler_Heat", "보일러 열원 활동", "Natural_Gas / LPG / Biomethane"],
         ["Fleet_Fuel", "사내차량 연료 활동", "Diesel_Fleet / LNG_Fleet / EV_Fleet"],
         ["Electricity_Procurement_<Location>", "전력 조달 활동", "Grid_Region_A / Solar_Onsite"],
-        ["Flow_RouteX_Origin_to_Destination", "공급망 이동 활동", "Truck / Rail / Ship"],
+        ["Flow_SEQn_owner_to_client", "공급망 이동 활동", "Truck / Rail / Ship"],
     ],
     columns=["activity_group", "설명", "예시 option_name"]
 )
 
-# 기본 내장 샘플 CSV (업로드 안 해도 결과 확인용)
-DEFAULT_SAMPLE_TEXT = """scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description,usage_location,procurement_region,route_id,origin,destination,quantity_ton,distance_km,transport_mode
-Scope1,Plant_A,Boiler_Heat,Natural_Gas,120,0,120,MWh,0.22,55,사업장 보일러 열원,,,,,,,
-Scope1,Plant_A,Fleet_Fuel,Diesel_Fleet,40,0,40,MWh,0.27,60,사내차량 연료,,,,,,,
-Scope2,Plant_A,Electricity_Procurement_Plant_A,Grid_Region_A,180,0,180,MWh,0.48,98,사업장 전력 사용,Plant_A,Region_A,,,,,
-Scope3,Plant_A,Flow_R1_Supplier_Incheon_to_Plant_A,Truck,23085,0,23085,ton-km,0.00018,1.20,기본 공급망 이동,,,R1,Supplier_Incheon,Plant_A,120,192.38,Truck
-"""
+# ============================================================
+# 2. 기본 샘플 데이터 생성을 위한 초기값
+# ============================================================
+DEFAULT_ROUTE_PRESETS = [
+    {
+        "owner_name": "Owner_1_Shanghai",
+        "owner_lat": 31.2304,
+        "owner_lon": 121.4737,
+        "client_name": "Client_1_Plant_A",
+        "client_lat": 37.2636,
+        "client_lon": 127.0286,
+        "quantity_ton": 120.0,
+        "modes": ["Truck", "Rail", "Ship"],
+        "baseline_mode": "Ship",
+        "site": "Plant_A",
+    },
+    {
+        "owner_name": "Owner_2_Plant_A",
+        "owner_lat": 37.2636,
+        "owner_lon": 127.0286,
+        "client_name": "Client_2_Tokyo",
+        "client_lat": 35.6762,
+        "client_lon": 139.6503,
+        "quantity_ton": 80.0,
+        "modes": ["Truck", "Rail", "Ship"],
+        "baseline_mode": "Ship",
+        "site": "Plant_A",
+    },
+]
 
 # ============================================================
-# 2. 유틸 함수
+# 3. 유틸 함수
 # ============================================================
-def get_node_row(node_name: str):
-    row = NODES_DF[NODES_DF["node"] == node_name]
-    if row.empty:
-        return None
-    return row.iloc[0].to_dict()
-
-
 def haversine_km(lat1, lon1, lat2, lon2):
     r = 6371.0
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
@@ -158,17 +172,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     c = 2 * math.asin(math.sqrt(a))
     return r * c
-
-
-def find_nearest_node(lat, lon):
-    best_node = None
-    best_dist = None
-    for _, row in NODES_DF.iterrows():
-        d = haversine_km(lat, lon, row["lat"], row["lon"])
-        if best_dist is None or d < best_dist:
-            best_dist = d
-            best_node = row["node"]
-    return best_node
 
 
 def ensure_optional_columns(df: pd.DataFrame):
@@ -220,10 +223,8 @@ def validate_input_df(df: pd.DataFrame):
     return True, "입력 데이터 검증 완료", df
 
 
-def make_choice_rows(scope, site, activity_group, demand, candidate_options, baseline_option, option_catalog, description, extra_cols=None):
+def make_choice_rows(scope, site, activity_group, demand, candidate_options, baseline_option, option_catalog, description):
     rows = []
-    extra_cols = extra_cols or {}
-
     candidate_options = [opt for opt in candidate_options if opt in option_catalog]
     if not candidate_options:
         return rows
@@ -246,7 +247,8 @@ def make_choice_rows(scope, site, activity_group, demand, candidate_options, bas
             "cost_per_unit": meta["cost"],
             "description": description,
         }
-        row.update(extra_cols)
+        for c in OPTIONAL_COLS:
+            row[c] = ""
         rows.append(row)
     return rows
 
@@ -260,8 +262,8 @@ def build_scope2_rows(site, usage_location, procurement_region, demand, candidat
         baseline_method = candidate_methods[0]
 
     rows = []
-
     option_map = {}
+
     if "Grid" in candidate_methods:
         option_map["Grid"] = {
             "name": f"Grid_{procurement_region}",
@@ -284,7 +286,7 @@ def build_scope2_rows(site, usage_location, procurement_region, demand, candidat
 
     for method in candidate_methods:
         meta = option_map[method]
-        rows.append({
+        row = {
             "scope": "Scope2",
             "site": site,
             "activity_group": activity_group,
@@ -296,28 +298,36 @@ def build_scope2_rows(site, usage_location, procurement_region, demand, candidat
             "emission_factor_tco2_per_unit": meta["ef"],
             "cost_per_unit": meta["cost"],
             "description": meta["desc"],
-            "usage_location": usage_location,
-            "procurement_region": procurement_region,
-            "route_id": "",
-            "origin": "",
-            "destination": "",
-            "quantity_ton": "",
-            "distance_km": "",
-            "transport_mode": "",
-        })
+        }
+        for c in OPTIONAL_COLS:
+            row[c] = ""
+        row["usage_location"] = usage_location
+        row["procurement_region"] = procurement_region
+        rows.append(row)
+
     return rows
 
 
-def build_scope3_rows(site, route_id, origin, destination, quantity_ton, candidate_modes, baseline_mode):
-    origin_row = get_node_row(origin)
-    dest_row = get_node_row(destination)
-    if origin_row is None or dest_row is None:
+def build_scope3_rows(
+    site,
+    sequence_no,
+    owner_name,
+    owner_lat,
+    owner_lon,
+    client_name,
+    client_lat,
+    client_lon,
+    quantity_ton,
+    candidate_modes,
+    baseline_mode,
+):
+    if owner_lat is None or owner_lon is None or client_lat is None or client_lon is None:
         return []
 
-    if origin == destination:
+    if owner_lat == client_lat and owner_lon == client_lon:
         return []
 
-    distance_km = haversine_km(origin_row["lat"], origin_row["lon"], dest_row["lat"], dest_row["lon"])
+    distance_km = haversine_km(owner_lat, owner_lon, client_lat, client_lon)
     ton_km = float(quantity_ton) * float(distance_km)
 
     candidate_modes = [m for m in candidate_modes if m in TRANSPORT_MODE_META]
@@ -327,12 +337,13 @@ def build_scope3_rows(site, route_id, origin, destination, quantity_ton, candida
     if baseline_mode not in candidate_modes:
         baseline_mode = candidate_modes[0]
 
-    rows = []
-    activity_group = f"Flow_{route_id}_{origin}_to_{destination}"
+    route_id = f"SEQ{sequence_no}"
+    activity_group = f"Flow_{route_id}_{owner_name}_to_{client_name}"
 
+    rows = []
     for mode in candidate_modes:
         meta = TRANSPORT_MODE_META[mode]
-        rows.append({
+        row = {
             "scope": "Scope3",
             "site": site,
             "activity_group": activity_group,
@@ -343,16 +354,23 @@ def build_scope3_rows(site, route_id, origin, destination, quantity_ton, candida
             "unit": meta["unit"],
             "emission_factor_tco2_per_unit": meta["ef"],
             "cost_per_unit": meta["cost"],
-            "description": f"{origin} → {destination} 공급망 이동",
-            "usage_location": "",
-            "procurement_region": "",
-            "route_id": route_id,
-            "origin": origin,
-            "destination": destination,
-            "quantity_ton": float(quantity_ton),
-            "distance_km": float(distance_km),
-            "transport_mode": mode,
-        })
+            "description": f"{owner_name} → {client_name} 공급망 이동",
+        }
+        for c in OPTIONAL_COLS:
+            row[c] = ""
+        row["route_id"] = route_id
+        row["sequence_no"] = sequence_no
+        row["origin"] = owner_name
+        row["destination"] = client_name
+        row["quantity_ton"] = float(quantity_ton)
+        row["distance_km"] = float(distance_km)
+        row["transport_mode"] = mode
+        row["origin_lat"] = float(owner_lat)
+        row["origin_lon"] = float(owner_lon)
+        row["destination_lat"] = float(client_lat)
+        row["destination_lon"] = float(client_lon)
+        rows.append(row)
+
     return rows
 
 
@@ -415,14 +433,22 @@ def optimize_total_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0)
     result_df["delta_amount"] = result_df["optimized_amount"] - result_df["baseline_amount"]
 
     result_df["baseline_emissions_tco2"] = (
-        result_df["baseline_amount"] * result_df["emission_factor_tco2_per_unit"]
+        pd.to_numeric(result_df["baseline_amount"], errors="coerce").fillna(0)
+        * pd.to_numeric(result_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)
     )
     result_df["optimized_emissions_tco2"] = (
-        result_df["optimized_amount"] * result_df["emission_factor_tco2_per_unit"]
+        pd.to_numeric(result_df["optimized_amount"], errors="coerce").fillna(0)
+        * pd.to_numeric(result_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)
     )
 
-    result_df["baseline_cost"] = result_df["baseline_amount"] * result_df["cost_per_unit"]
-    result_df["optimized_cost"] = result_df["optimized_amount"] * result_df["cost_per_unit"]
+    result_df["baseline_cost"] = (
+        pd.to_numeric(result_df["baseline_amount"], errors="coerce").fillna(0)
+        * pd.to_numeric(result_df["cost_per_unit"], errors="coerce").fillna(0)
+    )
+    result_df["optimized_cost"] = (
+        pd.to_numeric(result_df["optimized_amount"], errors="coerce").fillna(0)
+        * pd.to_numeric(result_df["cost_per_unit"], errors="coerce").fillna(0)
+    )
 
     scope_summary = result_df.groupby("scope", as_index=False).agg(
         baseline_amount=("baseline_amount", "sum"),
@@ -459,9 +485,7 @@ def optimize_total_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0)
         "baseline_cost": float(result_df["baseline_cost"].sum()),
         "optimized_cost": float(result_df["optimized_cost"].sum()),
     }
-    total["reduction_tco2"] = (
-        total["baseline_emissions_tco2"] - total["optimized_emissions_tco2"]
-    )
+    total["reduction_tco2"] = total["baseline_emissions_tco2"] - total["optimized_emissions_tco2"]
     total["reduction_pct"] = (
         100 * total["reduction_tco2"] / total["baseline_emissions_tco2"]
         if total["baseline_emissions_tco2"] > 0 else 0
@@ -481,20 +505,7 @@ def build_signature(df: pd.DataFrame) -> str:
     return hashlib.md5(csv_text.encode("utf-8")).hexdigest()
 
 
-def summarize_routes(df: pd.DataFrame, optimized=False):
-    if "route_id" not in df.columns:
-        return pd.DataFrame()
-
-    route_df = df.copy()
-    route_df = route_df[route_df["route_id"].astype(str).str.strip() != ""].copy()
-    if route_df.empty:
-        return pd.DataFrame()
-
 def get_dominant_mode_from_mix(mix_text: str):
-    """
-    optimized_mix 예: 'Truck:12000.0, Rail:8000.0'
-    가장 많이 배정된 운송수단명을 반환
-    """
     if mix_text is None or str(mix_text).strip() == "":
         return ""
 
@@ -519,23 +530,50 @@ def get_dominant_mode_from_mix(mix_text: str):
 
     return best_mode
 
-    
+
+def summarize_routes(df: pd.DataFrame, optimized=False):
+    if "route_id" not in df.columns:
+        return pd.DataFrame()
+
+    route_df = df.copy()
+    route_df = route_df[route_df["route_id"].astype(str).str.strip() != ""].copy()
+    if route_df.empty:
+        return pd.DataFrame()
+
+    numeric_cols = [
+        "quantity_ton",
+        "distance_km",
+        "origin_lat",
+        "origin_lon",
+        "destination_lat",
+        "destination_lon",
+        "baseline_amount",
+        "emission_factor_tco2_per_unit",
+    ]
+    for col in numeric_cols:
+        if col in route_df.columns:
+            route_df[col] = pd.to_numeric(route_df[col], errors="coerce")
+
     if "baseline_emissions_tco2" not in route_df.columns:
         route_df["baseline_emissions_tco2"] = (
-            route_df["baseline_amount"] * route_df["emission_factor_tco2_per_unit"]
+            route_df["baseline_amount"].fillna(0) * pd.to_numeric(route_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)
         )
 
     if "optimized_emissions_tco2" not in route_df.columns:
         if "optimized_amount" in route_df.columns:
             route_df["optimized_emissions_tco2"] = (
-                route_df["optimized_amount"] * route_df["emission_factor_tco2_per_unit"]
+                pd.to_numeric(route_df["optimized_amount"], errors="coerce").fillna(0)
+                * pd.to_numeric(route_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)
             )
         else:
             route_df["optimized_emissions_tco2"] = route_df["baseline_emissions_tco2"]
 
     agg_col = "optimized_emissions_tco2" if optimized else "baseline_emissions_tco2"
 
-    summary = route_df.groupby(["route_id", "site", "origin", "destination"], as_index=False).agg(
+    summary = route_df.groupby(
+        ["route_id", "sequence_no", "site", "origin", "destination", "origin_lat", "origin_lon", "destination_lat", "destination_lon"],
+        as_index=False
+    ).agg(
         quantity_ton=("quantity_ton", "first"),
         distance_km=("distance_km", "first"),
         emissions_tco2=(agg_col, "sum"),
@@ -552,8 +590,9 @@ def get_dominant_mode_from_mix(mix_text: str):
             return ""
         out = []
         for _, r in g.iterrows():
-            if r["optimized_amount"] > 1e-9:
-                out.append(f"{r['transport_mode']}:{r['optimized_amount']:.1f}")
+            amt = float(r["optimized_amount"])
+            if amt > 1e-9:
+                out.append(f"{r['transport_mode']}:{amt:.1f}")
         return ", ".join(out)
 
     mode_info = []
@@ -566,35 +605,13 @@ def get_dominant_mode_from_mix(mix_text: str):
     mode_info = pd.DataFrame(mode_info)
 
     summary = summary.merge(mode_info, on="route_id", how="left")
-
-    node_lookup = NODES_DF.set_index("node")
-    summary["source_lon"] = summary["origin"].map(node_lookup["lon"])
-    summary["source_lat"] = summary["origin"].map(node_lookup["lat"])
-    summary["target_lon"] = summary["destination"].map(node_lookup["lon"])
-    summary["target_lat"] = summary["destination"].map(node_lookup["lat"])
-
     return summary
 
 
 def build_node_points(df: pd.DataFrame, result_df=None):
-    node_names = set()
+    points = []
 
-    if "site" in df.columns:
-        node_names.update(df["site"].dropna().astype(str).tolist())
-    if "usage_location" in df.columns:
-        node_names.update([x for x in df["usage_location"].dropna().astype(str).tolist() if x != ""])
-    if "origin" in df.columns:
-        node_names.update([x for x in df["origin"].dropna().astype(str).tolist() if x != ""])
-    if "destination" in df.columns:
-        node_names.update([x for x in df["destination"].dropna().astype(str).tolist() if x != ""])
-
-    points = NODES_DF[NODES_DF["node"].isin(node_names)].copy()
-    if points.empty:
-        return points
-
-    baseline_map = {}
-    optimized_map = {}
-
+    # 정적 사업장/창고 노드 (Scope1/2)
     work_df = result_df if result_df is not None else df
     work_df = work_df.copy()
 
@@ -610,6 +627,9 @@ def build_node_points(df: pd.DataFrame, result_df=None):
             * pd.to_numeric(work_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)
         )
 
+    baseline_map = {}
+    optimized_map = {}
+
     for _, r in work_df[work_df["scope"].isin(["Scope1", "Scope2"])].iterrows():
         node_name = r["site"]
         if r.get("usage_location", "") not in ["", None] and r["scope"] == "Scope2":
@@ -618,27 +638,62 @@ def build_node_points(df: pd.DataFrame, result_df=None):
         baseline_map[node_name] = baseline_map.get(node_name, 0.0) + float(r.get("baseline_emissions_tco2", 0.0))
         optimized_map[node_name] = optimized_map.get(node_name, 0.0) + float(r.get("optimized_emissions_tco2", 0.0))
 
-    points["baseline_tco2"] = points["node"].map(baseline_map).fillna(0.0)
-    points["optimized_tco2"] = points["node"].map(optimized_map).fillna(0.0)
+    for _, r in STATIC_NODES_DF.iterrows():
+        if r["node"] in baseline_map or r["node"] in optimized_map:
+            info = f"{r['node_type']} | baseline={baseline_map.get(r['node'], 0.0):.2f} tCO2"
+            if result_df is not None:
+                info += f" | optimized={optimized_map.get(r['node'], 0.0):.2f} tCO2"
+            points.append({
+                "node": r["node"],
+                "node_type": r["node_type"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "info": info,
+            })
 
-    if result_df is None:
-        points["info"] = points.apply(
-            lambda r: f"{r['node_type']} | baseline={r['baseline_tco2']:.2f} tCO2",
-            axis=1
-        )
-    else:
-        points["info"] = points.apply(
-            lambda r: f"{r['node_type']} | baseline={r['baseline_tco2']:.2f} tCO2 | optimized={r['optimized_tco2']:.2f} tCO2",
-            axis=1
-        )
-    return points
+    # Scope3 owner/client 좌표
+    route_df = df.copy()
+    route_df = route_df[route_df["route_id"].astype(str).str.strip() != ""].copy()
+
+    for _, r in route_df.iterrows():
+        try:
+            o_lat = float(r["origin_lat"])
+            o_lon = float(r["origin_lon"])
+            d_lat = float(r["destination_lat"])
+            d_lon = float(r["destination_lon"])
+        except Exception:
+            continue
+
+        points.append({
+            "node": str(r["origin"]),
+            "node_type": "Owner",
+            "lat": o_lat,
+            "lon": o_lon,
+            "info": f"Owner | {r['origin']}",
+        })
+        points.append({
+            "node": str(r["destination"]),
+            "node_type": "Client",
+            "lat": d_lat,
+            "lon": d_lon,
+            "info": f"Client | {r['destination']}",
+        })
+
+    if not points:
+        return pd.DataFrame(columns=["node", "node_type", "lat", "lon", "info"])
+
+    points_df = pd.DataFrame(points).drop_duplicates(subset=["node", "lat", "lon", "node_type"])
+    return points_df
 
 
 def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, result_mode=False):
-    center_lat = float(NODES_DF["lat"].mean())
-    center_lon = float(NODES_DF["lon"].mean())
+    if points_df is None or points_df.empty:
+        m = folium.Map(location=[20, 110], zoom_start=2, tiles="CartoDB positron")
+        return m
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="CartoDB positron")
+    center_lat = float(points_df["lat"].mean())
+    center_lon = float(points_df["lon"].mean())
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=3, tiles="CartoDB positron")
 
     # 노드 표시
     for _, r in points_df.iterrows():
@@ -646,7 +701,7 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
         popup_text = f"{r['node']} ({r['node_type']})<br>{r.get('info', '')}"
         folium.CircleMarker(
             location=[r["lat"], r["lon"]],
-            radius=8,
+            radius=7,
             color=color,
             fill=True,
             fill_opacity=0.85,
@@ -655,33 +710,29 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
         ).add_to(m)
 
     # 경로 표시
-    if routes_df is not None and not routes_df.empty:
+    if isinstance(routes_df, pd.DataFrame) and not routes_df.empty:
         routes_df = routes_df.copy()
 
-        # 물량 기준 선 굵기 계산
-        # 최소 2, 최대 14 정도로 제한
-        max_qty = routes_df["quantity_ton"].fillna(0).max()
+        max_qty = pd.to_numeric(routes_df["quantity_ton"], errors="coerce").fillna(0).max()
         if max_qty <= 0:
             max_qty = 1.0
 
         for _, r in routes_df.iterrows():
-            if pd.isna(r["source_lat"]) or pd.isna(r["target_lat"]):
+            if pd.isna(r["origin_lat"]) or pd.isna(r["destination_lat"]):
                 continue
 
             quantity = float(r.get("quantity_ton", 0.0))
-
-            # 물량 비례 선 굵기
             weight = 2 + 12 * (quantity / max_qty)
             weight = max(2, min(14, weight))
 
             if result_mode:
-                # 결과 지도에서는 optimized_mix에서 가장 큰 운송수단을 대표색으로 사용
                 dominant_mode = get_dominant_mode_from_mix(r.get("optimized_mix", ""))
                 if dominant_mode == "":
                     dominant_mode = r.get("baseline_mode", "")
                 color = TRANSPORT_MODE_COLOR.get(dominant_mode, "gray")
 
                 tooltip_text = (
+                    f"SEQ={r.get('sequence_no', '')} | "
                     f"{r['origin']} → {r['destination']} | "
                     f"물량={r['quantity_ton']:.1f} ton | "
                     f"거리={r['distance_km']:.1f} km | "
@@ -691,11 +742,11 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
                     f"optimized_mix={r.get('optimized_mix', '')}"
                 )
             else:
-                # 입력 지도에서는 현재 운송수단 색 사용
                 baseline_mode = r.get("baseline_mode", "")
                 color = TRANSPORT_MODE_COLOR.get(baseline_mode, "gray")
 
                 tooltip_text = (
+                    f"SEQ={r.get('sequence_no', '')} | "
                     f"{r['origin']} → {r['destination']} | "
                     f"물량={r['quantity_ton']:.1f} ton | "
                     f"거리={r['distance_km']:.1f} km | "
@@ -705,8 +756,8 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
 
             folium.PolyLine(
                 locations=[
-                    [r["source_lat"], r["source_lon"]],
-                    [r["target_lat"], r["target_lon"]],
+                    [r["origin_lat"], r["origin_lon"]],
+                    [r["destination_lat"], r["destination_lon"]],
                 ],
                 color=color,
                 weight=weight,
@@ -717,31 +768,91 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
     return m
 
 
+def build_default_sample_df():
+    rows = []
+    rows.extend(
+        make_choice_rows(
+            scope="Scope1",
+            site="Plant_A",
+            activity_group="Boiler_Heat",
+            demand=120.0,
+            candidate_options=list(SCOPE1_BOILER_OPTIONS.keys()),
+            baseline_option="Natural_Gas",
+            option_catalog=SCOPE1_BOILER_OPTIONS,
+            description="Plant_A 보일러 열원",
+        )
+    )
+    rows.extend(
+        make_choice_rows(
+            scope="Scope1",
+            site="Plant_A",
+            activity_group="Fleet_Fuel",
+            demand=40.0,
+            candidate_options=list(SCOPE1_FLEET_OPTIONS.keys()),
+            baseline_option="Diesel_Fleet",
+            option_catalog=SCOPE1_FLEET_OPTIONS,
+            description="Plant_A 사내차량 연료",
+        )
+    )
+    rows.extend(
+        build_scope2_rows(
+            site="Plant_A",
+            usage_location="Plant_A",
+            procurement_region="Region_A",
+            demand=180.0,
+            candidate_methods=["Grid", "Solar_Onsite"],
+            baseline_method="Grid",
+        )
+    )
+    for idx, preset in enumerate(DEFAULT_ROUTE_PRESETS, start=1):
+        rows.extend(
+            build_scope3_rows(
+                site=preset["site"],
+                sequence_no=idx,
+                owner_name=preset["owner_name"],
+                owner_lat=preset["owner_lat"],
+                owner_lon=preset["owner_lon"],
+                client_name=preset["client_name"],
+                client_lat=preset["client_lat"],
+                client_lon=preset["client_lon"],
+                quantity_ton=preset["quantity_ton"],
+                candidate_modes=preset["modes"],
+                baseline_mode=preset["baseline_mode"],
+            )
+        )
+    return pd.DataFrame(rows)
+
+
 # ============================================================
-# 3. 제목
+# 4. 세션 상태 초기화
+# ============================================================
+if "pending_pick" not in st.session_state:
+    st.session_state["pending_pick"] = None
+
+# ============================================================
+# 5. 제목
 # ============================================================
 st.title("공급망 기반 탄소배출량 최적화 데모")
 st.write(
-    "사용자가 Scope 1/2/3 구조를 직접 선택하고, 공급망 이동 경로와 운송수단을 구성한 뒤, "
-    "총 탄소배출량을 최소화하는 데모입니다."
+    "사용자가 Scope 1/2/3 구조를 직접 선택하고, Scope 3의 owner/client 좌표를 지도에서 직접 찍어 "
+    "글로벌 공급망 경로를 구성한 뒤 총 탄소배출량을 최소화하는 데모입니다."
 )
 
 tab1, tab2, tab3 = st.tabs(["공급망 구조 및 입력", "Scope별 최적화", "결과 및 보고서"])
 
 # ============================================================
-# 4. 탭 1: 공급망 구조 및 입력
+# 6. 탭 1: 공급망 구조 및 입력
 # ============================================================
 with tab1:
     st.header("1. 공급망 구조 및 입력")
 
     selected_scopes = st.multiselect("활성 Scope 선택", SCOPE_LIST, default=SCOPE_LIST)
-
     if not selected_scopes:
         st.warning("최소 하나의 Scope를 선택하세요.")
         st.stop()
 
     st.subheader("고급 옵션: 통합 CSV 업로드")
-    st.caption("업로드를 하지 않으면 아래 UI에서 구성한 기본 구조 데이터를 사용합니다.")
+    st.caption("업로드를 하지 않으면 아래 UI에서 구성한 데이터 또는 기본 샘플 데이터를 사용합니다.")
     uploaded_file = st.file_uploader("통합 CSV 업로드 (선택)", type=["csv"])
 
     ui_rows = []
@@ -791,7 +902,6 @@ with tab1:
                             baseline_option=baseline_boiler,
                             option_catalog=SCOPE1_BOILER_OPTIONS,
                             description=f"{site} 보일러 열원",
-                            extra_cols={c: "" for c in OPTIONAL_COLS},
                         )
                     )
 
@@ -828,7 +938,6 @@ with tab1:
                             baseline_option=baseline_fleet,
                             option_catalog=SCOPE1_FLEET_OPTIONS,
                             description=f"{site} 사내차량 연료",
-                            extra_cols={c: "" for c in OPTIONAL_COLS},
                         )
                     )
 
@@ -891,124 +1000,159 @@ with tab1:
     # ----------------------------
     if "Scope3" in selected_scopes:
         st.markdown("---")
-        st.subheader("Scope 3 - 공급망 이동 흐름 선택")
-        st.caption("아래 버튼을 누른 뒤 지도에서 노드를 클릭하면 출발지/도착지가 자동으로 선택됩니다. 최대 50개 경로까지 생성할 수 있습니다.")
+        st.subheader("Scope 3 - 글로벌 공급망 경로 생성")
+        st.caption("아래 버튼을 누른 뒤 지도에서 클릭하면 owner/client 좌표가 기록됩니다. 공급망 순서 1..n 형식으로 최대 50개 경로까지 생성할 수 있습니다.")
 
         scope3_sites = st.multiselect("Scope3 관련 사업장 선택", PLANT_NODES, default=["Plant_A"], key="scope3_sites")
+        if not scope3_sites:
+            scope3_sites = ["Plant_A"]
 
-        num_routes = st.number_input("추가할 공급망 경로 수", min_value=1, max_value=50, value=2, step=1)
+        num_routes = st.number_input("공급망 경로 수", min_value=1, max_value=50, value=2, step=1)
 
-        # 세션 상태 초기화
-        if "pending_pick" not in st.session_state:
-            st.session_state["pending_pick"] = None
-
+        # 기본 세션값 초기화
         for i in range(int(num_routes)):
             if f"route_{i}_site" not in st.session_state:
-                st.session_state[f"route_{i}_site"] = scope3_sites[0] if scope3_sites else "Plant_A"
-            if f"route_{i}_origin" not in st.session_state:
-                st.session_state[f"route_{i}_origin"] = SUPPLIER_NODES[0]
-            if f"route_{i}_destination" not in st.session_state:
-                st.session_state[f"route_{i}_destination"] = PLANT_NODES[0]
+                st.session_state[f"route_{i}_site"] = scope3_sites[0]
+
+            if f"route_{i}_owner_name" not in st.session_state:
+                st.session_state[f"route_{i}_owner_name"] = DEFAULT_ROUTE_PRESETS[i]["owner_name"] if i < len(DEFAULT_ROUTE_PRESETS) else f"Owner_{i+1}"
+            if f"route_{i}_client_name" not in st.session_state:
+                st.session_state[f"route_{i}_client_name"] = DEFAULT_ROUTE_PRESETS[i]["client_name"] if i < len(DEFAULT_ROUTE_PRESETS) else f"Client_{i+1}"
+
+            if f"route_{i}_owner_lat" not in st.session_state:
+                st.session_state[f"route_{i}_owner_lat"] = DEFAULT_ROUTE_PRESETS[i]["owner_lat"] if i < len(DEFAULT_ROUTE_PRESETS) else None
+            if f"route_{i}_owner_lon" not in st.session_state:
+                st.session_state[f"route_{i}_owner_lon"] = DEFAULT_ROUTE_PRESETS[i]["owner_lon"] if i < len(DEFAULT_ROUTE_PRESETS) else None
+
+            if f"route_{i}_client_lat" not in st.session_state:
+                st.session_state[f"route_{i}_client_lat"] = DEFAULT_ROUTE_PRESETS[i]["client_lat"] if i < len(DEFAULT_ROUTE_PRESETS) else None
+            if f"route_{i}_client_lon" not in st.session_state:
+                st.session_state[f"route_{i}_client_lon"] = DEFAULT_ROUTE_PRESETS[i]["client_lon"] if i < len(DEFAULT_ROUTE_PRESETS) else None
+
             if f"route_{i}_quantity" not in st.session_state:
-                st.session_state[f"route_{i}_quantity"] = 120.0 if i == 0 else 80.0
+                st.session_state[f"route_{i}_quantity"] = DEFAULT_ROUTE_PRESETS[i]["quantity_ton"] if i < len(DEFAULT_ROUTE_PRESETS) else 100.0
             if f"route_{i}_modes" not in st.session_state:
-                st.session_state[f"route_{i}_modes"] = ["Truck", "Rail"]
+                st.session_state[f"route_{i}_modes"] = DEFAULT_ROUTE_PRESETS[i]["modes"] if i < len(DEFAULT_ROUTE_PRESETS) else ["Truck", "Rail"]
             if f"route_{i}_baseline_mode" not in st.session_state:
-                st.session_state[f"route_{i}_baseline_mode"] = "Truck"
+                st.session_state[f"route_{i}_baseline_mode"] = DEFAULT_ROUTE_PRESETS[i]["baseline_mode"] if i < len(DEFAULT_ROUTE_PRESETS) else "Truck"
 
-        st.write("### 노드 클릭 지도")
-        map_points_for_input = NODES_DF.copy()
+        # 미리보기 지도용 포인트
+        preview_points = []
 
-        # 현재 선택된 경로를 지도에 미리 표시
+        # 정적 사업장 점 추가
+        for _, r in STATIC_NODES_DF.iterrows():
+            preview_points.append({
+                "node": r["node"],
+                "node_type": r["node_type"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "info": f"{r['node_type']} | {r['node']}",
+            })
+
         preview_routes = []
-        for i in range(int(num_routes)):
-            origin = st.session_state.get(f"route_{i}_origin", "")
-            destination = st.session_state.get(f"route_{i}_destination", "")
-            quantity = st.session_state.get(f"route_{i}_quantity", 0.0)
-            if origin and destination and origin != destination:
-                ori = get_node_row(origin)
-                dst = get_node_row(destination)
-                if ori and dst:
-                    preview_routes.append({
-                        "route_id": f"R{i+1}",
-                        "origin": origin,
-                        "destination": destination,
-                        "quantity_ton": float(quantity),
-                        "distance_km": haversine_km(ori["lat"], ori["lon"], dst["lat"], dst["lon"]),
-                        "source_lat": ori["lat"],
-                        "source_lon": ori["lon"],
-                        "target_lat": dst["lat"],
-                        "target_lon": dst["lon"],
-                        "baseline_mode": st.session_state.get(f"route_{i}_baseline_mode", ""),
-                        "emissions_tco2": 0.0,
-                        "label": f"R{i+1}",
-                        "info": f"{origin} → {destination} | 물량={float(quantity):.1f} ton",
-                    })
-        preview_routes_df = pd.DataFrame(preview_routes) if preview_routes else pd.DataFrame()
 
-        input_map = make_folium_map(map_points_for_input, preview_routes_df, result_mode=False)
-        map_result = st_folium(input_map, width=None, height=500, key="supply_chain_input_map")
+        for i in range(int(num_routes)):
+            owner_name = st.session_state[f"route_{i}_owner_name"]
+            client_name = st.session_state[f"route_{i}_client_name"]
+            owner_lat = st.session_state[f"route_{i}_owner_lat"]
+            owner_lon = st.session_state[f"route_{i}_owner_lon"]
+            client_lat = st.session_state[f"route_{i}_client_lat"]
+            client_lon = st.session_state[f"route_{i}_client_lon"]
+            qty = float(st.session_state[f"route_{i}_quantity"])
+
+            if owner_lat is not None and owner_lon is not None:
+                preview_points.append({
+                    "node": owner_name,
+                    "node_type": "Owner",
+                    "lat": owner_lat,
+                    "lon": owner_lon,
+                    "info": f"Owner | {owner_name}",
+                })
+            if client_lat is not None and client_lon is not None:
+                preview_points.append({
+                    "node": client_name,
+                    "node_type": "Client",
+                    "lat": client_lat,
+                    "lon": client_lon,
+                    "info": f"Client | {client_name}",
+                })
+
+            if owner_lat is not None and owner_lon is not None and client_lat is not None and client_lon is not None:
+                distance_km = haversine_km(owner_lat, owner_lon, client_lat, client_lon)
+                preview_routes.append({
+                    "route_id": f"SEQ{i+1}",
+                    "sequence_no": i + 1,
+                    "origin": owner_name,
+                    "destination": client_name,
+                    "origin_lat": owner_lat,
+                    "origin_lon": owner_lon,
+                    "destination_lat": client_lat,
+                    "destination_lon": client_lon,
+                    "quantity_ton": qty,
+                    "distance_km": distance_km,
+                    "baseline_mode": st.session_state[f"route_{i}_baseline_mode"],
+                    "emissions_tco2": 0.0,
+                })
+
+        preview_points_df = pd.DataFrame(preview_points).drop_duplicates(subset=["node", "lat", "lon", "node_type"])
+        preview_routes_df = pd.DataFrame(preview_routes)
+
+        st.write("### owner / client 지도 선택")
+        pick_map = make_folium_map(preview_points_df, preview_routes_df, result_mode=False)
+        map_result = st_folium(pick_map, width=None, height=550, key="global_route_picker_map")
 
         if st.session_state["pending_pick"] is not None and map_result and map_result.get("last_clicked"):
             clicked = map_result["last_clicked"]
-            nearest_node = find_nearest_node(clicked["lat"], clicked["lng"])
-
             pick_type, idx_str = st.session_state["pending_pick"].split("|")
             idx = int(idx_str)
 
-            if pick_type == "origin":
-                st.session_state[f"route_{idx}_origin"] = nearest_node
-            elif pick_type == "destination":
-                st.session_state[f"route_{idx}_destination"] = nearest_node
+            if pick_type == "owner":
+                st.session_state[f"route_{idx}_owner_lat"] = clicked["lat"]
+                st.session_state[f"route_{idx}_owner_lon"] = clicked["lng"]
+            elif pick_type == "client":
+                st.session_state[f"route_{idx}_client_lat"] = clicked["lat"]
+                st.session_state[f"route_{idx}_client_lon"] = clicked["lng"]
 
             st.session_state["pending_pick"] = None
             st.rerun()
 
         if st.session_state["pending_pick"] is not None:
             pick_type, idx_str = st.session_state["pending_pick"].split("|")
-            if pick_type == "origin":
-                st.info(f"경로 {int(idx_str)+1}의 출발지를 선택 중입니다. 지도에서 노드를 클릭하세요.")
+            if pick_type == "owner":
+                st.info(f"공급망 순서 {int(idx_str)+1}의 owner 위치를 지도에서 클릭하세요.")
             else:
-                st.info(f"경로 {int(idx_str)+1}의 도착지를 선택 중입니다. 지도에서 노드를 클릭하세요.")
+                st.info(f"공급망 순서 {int(idx_str)+1}의 client 위치를 지도에서 클릭하세요.")
 
         for i in range(int(num_routes)):
-            with st.expander(f"경로 {i+1} 설정", expanded=(i == 0)):
+            with st.expander(f"공급망 순서 {i+1} 설정", expanded=(i == 0)):
                 st.selectbox(
-                    f"경로 {i+1} 관련 사업장",
-                    scope3_sites if scope3_sites else PLANT_NODES,
+                    f"순서 {i+1} 관련 사업장",
+                    scope3_sites,
                     key=f"route_{i}_site",
                 )
 
+                st.text_input(f"순서 {i+1} owner 이름", key=f"route_{i}_owner_name")
+                st.text_input(f"순서 {i+1} client 이름", key=f"route_{i}_client_name")
+
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.write(f"현재 출발지: **{st.session_state[f'route_{i}_origin']}**")
-                    if st.button(f"경로 {i+1} 출발지 지도에서 선택", key=f"pick_origin_{i}"):
-                        st.session_state["pending_pick"] = f"origin|{i}"
+                    owner_lat = st.session_state[f"route_{i}_owner_lat"]
+                    owner_lon = st.session_state[f"route_{i}_owner_lon"]
+                    st.write(f"owner 좌표: {owner_lat}, {owner_lon}")
+                    if st.button(f"순서 {i+1} owner 지도에서 찍기", key=f"pick_owner_{i}"):
+                        st.session_state["pending_pick"] = f"owner|{i}"
                         st.rerun()
 
                 with c2:
-                    st.write(f"현재 도착지: **{st.session_state[f'route_{i}_destination']}**")
-                    if st.button(f"경로 {i+1} 도착지 지도에서 선택", key=f"pick_destination_{i}"):
-                        st.session_state["pending_pick"] = f"destination|{i}"
+                    client_lat = st.session_state[f"route_{i}_client_lat"]
+                    client_lon = st.session_state[f"route_{i}_client_lon"]
+                    st.write(f"client 좌표: {client_lat}, {client_lon}")
+                    if st.button(f"순서 {i+1} client 지도에서 찍기", key=f"pick_client_{i}"):
+                        st.session_state["pending_pick"] = f"client|{i}"
                         st.rerun()
 
-                # 수동 보정용 선택박스
-                st.selectbox(
-                    f"경로 {i+1} 출발지(수동 수정 가능)",
-                    ALL_NODE_NAMES,
-                    key=f"route_{i}_origin",
-                )
-                destination_candidates = [n for n in ALL_NODE_NAMES if n != st.session_state[f"route_{i}_origin"]]
-                if st.session_state[f"route_{i}_destination"] == st.session_state[f"route_{i}_origin"]:
-                    st.session_state[f"route_{i}_destination"] = destination_candidates[0]
-                st.selectbox(
-                    f"경로 {i+1} 도착지(수동 수정 가능)",
-                    destination_candidates,
-                    key=f"route_{i}_destination",
-                )
-
                 st.number_input(
-                    f"경로 {i+1} 물량 (ton)",
+                    f"순서 {i+1} 물량 (ton)",
                     min_value=1.0,
                     value=float(st.session_state[f"route_{i}_quantity"]),
                     step=10.0,
@@ -1016,7 +1160,7 @@ with tab1:
                 )
 
                 st.multiselect(
-                    f"경로 {i+1} 운송수단 후보",
+                    f"순서 {i+1} 운송수단 후보",
                     list(TRANSPORT_MODE_META.keys()),
                     default=st.session_state[f"route_{i}_modes"],
                     key=f"route_{i}_modes",
@@ -1028,30 +1172,28 @@ with tab1:
                 current_baseline = st.session_state.get(f"route_{i}_baseline_mode", current_modes[0])
                 if current_baseline not in current_modes:
                     st.session_state[f"route_{i}_baseline_mode"] = current_modes[0]
+
                 st.selectbox(
-                    f"경로 {i+1} 현재 운송수단",
+                    f"순서 {i+1} 현재 운송수단",
                     current_modes,
                     key=f"route_{i}_baseline_mode",
                 )
 
-        # UI 기반 Scope3 데이터 생성
+        # UI 기반 Scope3 생성
         for i in range(int(num_routes)):
-            related_site = st.session_state[f"route_{i}_site"]
-            origin = st.session_state[f"route_{i}_origin"]
-            destination = st.session_state[f"route_{i}_destination"]
-            quantity_ton = st.session_state[f"route_{i}_quantity"]
-            candidate_modes = st.session_state[f"route_{i}_modes"]
-            baseline_mode = st.session_state[f"route_{i}_baseline_mode"]
-
             ui_rows.extend(
                 build_scope3_rows(
-                    site=related_site,
-                    route_id=f"R{i+1}",
-                    origin=origin,
-                    destination=destination,
-                    quantity_ton=quantity_ton,
-                    candidate_modes=candidate_modes,
-                    baseline_mode=baseline_mode,
+                    site=st.session_state[f"route_{i}_site"],
+                    sequence_no=i + 1,
+                    owner_name=st.session_state[f"route_{i}_owner_name"],
+                    owner_lat=st.session_state[f"route_{i}_owner_lat"],
+                    owner_lon=st.session_state[f"route_{i}_owner_lon"],
+                    client_name=st.session_state[f"route_{i}_client_name"],
+                    client_lat=st.session_state[f"route_{i}_client_lat"],
+                    client_lon=st.session_state[f"route_{i}_client_lon"],
+                    quantity_ton=st.session_state[f"route_{i}_quantity"],
+                    candidate_modes=st.session_state[f"route_{i}_modes"],
+                    baseline_mode=st.session_state[f"route_{i}_baseline_mode"],
                 )
             )
 
@@ -1066,7 +1208,7 @@ with tab1:
             raw_df = pd.DataFrame(ui_rows)
             st.info("현재 UI에서 구성한 공급망 데이터를 사용 중입니다.")
         else:
-            raw_df = pd.read_csv(StringIO(DEFAULT_SAMPLE_TEXT))
+            raw_df = build_default_sample_df()
             st.info("현재 기본 내장 샘플 데이터를 사용 중입니다.")
 
     raw_df = ensure_optional_columns(raw_df)
@@ -1092,8 +1234,18 @@ with tab1:
     st.subheader("현재 구성된 공급망 데이터")
     st.dataframe(cleaned_df, use_container_width=True)
 
+    st.subheader("입력 공급망 지도")
+    input_points = build_node_points(cleaned_df)
+    input_routes = summarize_routes(cleaned_df, optimized=False)
+
+    if isinstance(input_routes, pd.DataFrame) and not input_routes.empty:
+        input_map = make_folium_map(input_points, input_routes, result_mode=False)
+    else:
+        input_map = make_folium_map(input_points, None, result_mode=False)
+    st_folium(input_map, width=None, height=550, key="input_supply_chain_map")
+
 # ============================================================
-# 5. 탭 2: Scope별 최적화
+# 7. 탭 2: Scope별 최적화
 # ============================================================
 with tab2:
     st.header("2. Scope별 최적화")
@@ -1128,10 +1280,12 @@ with tab2:
         st.write("현재 구성한 Scope 1/2/3 전체를 대상으로 총 탄소배출량을 최소화합니다.")
 
         baseline_total_emissions = float(
-            (cleaned_df["baseline_amount"] * cleaned_df["emission_factor_tco2_per_unit"]).sum()
+            (pd.to_numeric(cleaned_df["baseline_amount"], errors="coerce").fillna(0) *
+             pd.to_numeric(cleaned_df["emission_factor_tco2_per_unit"], errors="coerce").fillna(0)).sum()
         )
         baseline_total_cost = float(
-            (cleaned_df["baseline_amount"] * cleaned_df["cost_per_unit"]).sum()
+            (pd.to_numeric(cleaned_df["baseline_amount"], errors="coerce").fillna(0) *
+             pd.to_numeric(cleaned_df["cost_per_unit"], errors="coerce").fillna(0)).sum()
         )
 
         c1, c2 = st.columns(2)
@@ -1161,7 +1315,7 @@ with tab2:
                 st.success("최적화를 완료했습니다. 결과 및 보고서 탭에서 상세 결과를 확인하세요.")
 
 # ============================================================
-# 6. 탭 3: 결과 및 보고서
+# 8. 탭 3: 결과 및 보고서
 # ============================================================
 with tab3:
     st.header("3. 결과 및 보고서")
@@ -1206,7 +1360,7 @@ with tab3:
             result_points = build_node_points(cleaned_df, detail)
             result_routes = summarize_routes(detail, optimized=True)
 
-            if not result_routes.empty:
+            if isinstance(result_routes, pd.DataFrame) and not result_routes.empty:
                 baseline_route_summary = summarize_routes(detail, optimized=False)[["route_id", "emissions_tco2"]].rename(
                     columns={"emissions_tco2": "baseline_route_emissions"}
                 )
@@ -1214,7 +1368,7 @@ with tab3:
                 result_routes["reduction_tco2"] = result_routes["baseline_route_emissions"] - result_routes["emissions_tco2"]
 
                 result_map = make_folium_map(result_points, result_routes, result_mode=True)
-                st_folium(result_map, width=None, height=550, key="result_supply_chain_map")
+                st_folium(result_map, width=None, height=600, key="result_supply_chain_map")
             else:
                 st.info("지도에 표시할 Scope 3 이동 경로가 없습니다.")
 
