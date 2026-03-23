@@ -98,6 +98,12 @@ TRANSPORT_MODE_META = {
     "Ship": {"ef": 0.00004, "cost": 1.50, "unit": "ton-km"},
 }
 
+TRANSPORT_MODE_COLOR = {
+    "Truck": "blue",
+    "Rail": "green",
+    "Ship": "purple",
+}
+
 # 컬럼 설명
 GUIDE_DF = pd.DataFrame(
     [
@@ -484,6 +490,36 @@ def summarize_routes(df: pd.DataFrame, optimized=False):
     if route_df.empty:
         return pd.DataFrame()
 
+def get_dominant_mode_from_mix(mix_text: str):
+    """
+    optimized_mix 예: 'Truck:12000.0, Rail:8000.0'
+    가장 많이 배정된 운송수단명을 반환
+    """
+    if mix_text is None or str(mix_text).strip() == "":
+        return ""
+
+    best_mode = ""
+    best_value = -1.0
+
+    parts = str(mix_text).split(",")
+    for part in parts:
+        part = part.strip()
+        if ":" not in part:
+            continue
+        mode, value = part.split(":", 1)
+        mode = mode.strip()
+        try:
+            value = float(value.strip())
+        except ValueError:
+            continue
+
+        if value > best_value:
+            best_value = value
+            best_mode = mode
+
+    return best_mode
+
+    
     if "baseline_emissions_tco2" not in route_df.columns:
         route_df["baseline_emissions_tco2"] = (
             route_df["baseline_amount"] * route_df["emission_factor_tco2_per_unit"]
@@ -620,29 +656,51 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
 
     # 경로 표시
     if routes_df is not None and not routes_df.empty:
+        routes_df = routes_df.copy()
+
+        # 물량 기준 선 굵기 계산
+        # 최소 2, 최대 14 정도로 제한
+        max_qty = routes_df["quantity_ton"].fillna(0).max()
+        if max_qty <= 0:
+            max_qty = 1.0
+
         for _, r in routes_df.iterrows():
             if pd.isna(r["source_lat"]) or pd.isna(r["target_lat"]):
                 continue
 
-            quantity = float(r.get("quantity_ton", 1.0))
-            weight = min(12, max(2, quantity / 20.0))
+            quantity = float(r.get("quantity_ton", 0.0))
+
+            # 물량 비례 선 굵기
+            weight = 2 + 12 * (quantity / max_qty)
+            weight = max(2, min(14, weight))
 
             if result_mode:
-                color = "green"
+                # 결과 지도에서는 optimized_mix에서 가장 큰 운송수단을 대표색으로 사용
+                dominant_mode = get_dominant_mode_from_mix(r.get("optimized_mix", ""))
+                if dominant_mode == "":
+                    dominant_mode = r.get("baseline_mode", "")
+                color = TRANSPORT_MODE_COLOR.get(dominant_mode, "gray")
+
                 tooltip_text = (
                     f"{r['origin']} → {r['destination']} | "
-                    f"물량={r['quantity_ton']:.1f} ton | 거리={r['distance_km']:.1f} km | "
+                    f"물량={r['quantity_ton']:.1f} ton | "
+                    f"거리={r['distance_km']:.1f} km | "
                     f"baseline={r.get('baseline_route_emissions', 0):.2f} tCO2 | "
                     f"optimized={r.get('emissions_tco2', 0):.2f} tCO2 | "
-                    f"reduction={r.get('reduction_tco2', 0):.2f} tCO2"
+                    f"reduction={r.get('reduction_tco2', 0):.2f} tCO2 | "
+                    f"optimized_mix={r.get('optimized_mix', '')}"
                 )
             else:
-                color = "blue"
+                # 입력 지도에서는 현재 운송수단 색 사용
+                baseline_mode = r.get("baseline_mode", "")
+                color = TRANSPORT_MODE_COLOR.get(baseline_mode, "gray")
+
                 tooltip_text = (
                     f"{r['origin']} → {r['destination']} | "
-                    f"물량={r['quantity_ton']:.1f} ton | 거리={r['distance_km']:.1f} km | "
+                    f"물량={r['quantity_ton']:.1f} ton | "
+                    f"거리={r['distance_km']:.1f} km | "
                     f"baseline={r.get('emissions_tco2', 0):.2f} tCO2 | "
-                    f"current={r.get('baseline_mode', '')}"
+                    f"current={baseline_mode}"
                 )
 
             folium.PolyLine(
