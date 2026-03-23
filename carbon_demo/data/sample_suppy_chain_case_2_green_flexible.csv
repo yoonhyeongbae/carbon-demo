@@ -1,0 +1,13 @@
+scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description
+Scope1,Plant_A,Boiler_Heat,Natural_Gas,70,10,100,MWh,0.22,55,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,LPG,10,0,30,MWh,0.27,68,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,Biomethane,40,0,140,MWh,0.06,88,사업장 보일러 열원
+Scope2,Plant_A,Electricity_Procurement,Grid,120,20,160,MWh,0.45,100,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Green_PPA,50,0,200,MWh,0.05,125,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Solar_Onsite,30,0,120,MWh,0.02,140,구매 전력
+Scope3,Plant_A,Inbound_Transport,Truck,180,30,220,ton-km,0.00018,1.20,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Rail,80,0,260,ton-km,0.00006,1.55,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Ship,40,0,180,ton-km,0.00004,1.50,원자재 운송
+Scope3,Plant_A,Material_Sourcing,Standard_Steel,60,10,80,ton,1.90,650,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Recycled_Steel,25,0,120,ton,1.10,710,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Green_Steel,15,0,90,ton,0.90,770,원자재 구매
