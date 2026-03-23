@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from ortools.linear_solver import pywraplp
 
-st.set_page_config(page_title="공급망 탄소배출량 최적화 데모", layout="wide")
+st.set_page_config(page_title="공급망 기반 탄소배출량 최적화 데모", layout="wide")
 
 REQUIRED_COLS = [
     "scope",
@@ -20,6 +20,87 @@ REQUIRED_COLS = [
 ]
 
 SCOPE_LIST = ["Scope1", "Scope2", "Scope3"]
+
+# --------------------------------------------------
+# 공급망 구조 템플릿 정의
+# 사용자가 UI에서 이것을 선택하면 최적화 대상 구조가 바뀜
+# --------------------------------------------------
+STRUCTURE_TEMPLATES = {
+    "구조 X - 전범위 통합형": {
+        "description": "직접배출 + 구매전력 + 운송 + 원자재 조달을 모두 포함하는 구조",
+        "groups": [
+            "Boiler_Heat",
+            "Electricity_Procurement",
+            "Inbound_Transport",
+            "Material_Sourcing",
+        ],
+        "nodes": [
+            "x1: Boiler_Heat (보일러/연료 열원)",
+            "x2: Electricity_Procurement (전력 조달)",
+            "x3: Inbound_Transport (원자재 운송)",
+            "x4: Material_Sourcing (원자재 조달)",
+        ],
+    },
+    "구조 Y - 조달 중심형": {
+        "description": "직접배출 + 구매전력 + 원자재 조달 중심 구조 (운송 제외)",
+        "groups": [
+            "Boiler_Heat",
+            "Electricity_Procurement",
+            "Material_Sourcing",
+        ],
+        "nodes": [
+            "y1: Boiler_Heat (보일러/연료 열원)",
+            "y2: Electricity_Procurement (전력 조달)",
+            "y3: Material_Sourcing (원자재 조달)",
+        ],
+    },
+    "구조 Z - 물류 중심형": {
+        "description": "직접배출 + 구매전력 + 원자재 운송 중심 구조 (원자재 조달 제외)",
+        "groups": [
+            "Boiler_Heat",
+            "Electricity_Procurement",
+            "Inbound_Transport",
+        ],
+        "nodes": [
+            "z1: Boiler_Heat (보일러/연료 열원)",
+            "z2: Electricity_Procurement (전력 조달)",
+            "z3: Inbound_Transport (원자재 운송)",
+        ],
+    },
+}
+
+# --------------------------------------------------
+# activity_group 설명용 표
+# --------------------------------------------------
+ACTIVITY_GROUP_GUIDE_DF = pd.DataFrame(
+    [
+        ["Boiler_Heat", "보일러/열원 활동", "Natural_Gas, LPG, Biomethane 등 같은 열원 대체 선택지 묶음"],
+        ["Electricity_Procurement", "전력 조달 활동", "Grid, Green_PPA, Solar_Onsite 등 전력 조달 방식 묶음"],
+        ["Inbound_Transport", "원자재 운송 활동", "Truck, Rail, Ship 등 원자재 운송 수단 묶음"],
+        ["Material_Sourcing", "원자재 조달 활동", "Standard_Steel, Recycled_Steel, Green_Steel 등 조달 대안 묶음"],
+    ],
+    columns=["activity_group", "설명", "예시 option_name"]
+)
+
+# --------------------------------------------------
+# 컬럼 설명 표
+# --------------------------------------------------
+GUIDE_DF = pd.DataFrame(
+    [
+        ["scope", "문자", "Scope1 / Scope2 / Scope3", "배출 범주"],
+        ["site", "문자", "Plant_A", "사업장명"],
+        ["activity_group", "문자", "Boiler_Heat", "같은 기능을 하는 대체 가능한 선택지 묶음"],
+        ["option_name", "문자", "Natural_Gas", "개별 선택지 이름"],
+        ["baseline_amount", "숫자", "100", "현재 기준안 사용량 또는 물량"],
+        ["min_amount", "숫자", "20", "최적화 후 최소 사용량"],
+        ["max_amount", "숫자", "140", "최적화 후 최대 사용량"],
+        ["unit", "문자", "MWh / ton / ton-km", "사용 단위"],
+        ["emission_factor_tco2_per_unit", "숫자", "0.22", "단위당 배출계수(tCO2/unit)"],
+        ["cost_per_unit", "숫자", "55", "단위당 비용"],
+        ["description", "문자", "사업장 보일러 열원", "행 설명용 텍스트"],
+    ],
+    columns=["컬럼명", "자료형", "예시", "설명"]
+)
 
 
 def validate_input_df(df: pd.DataFrame):
@@ -49,7 +130,6 @@ def validate_input_df(df: pd.DataFrame):
     if (df[numeric_cols] < 0).any().any():
         return False, "숫자 컬럼에 음수가 있습니다.", None
 
-    # 활동그룹별 수요가 min/max 범위 내인지 검사
     group_cols = ["site", "scope", "activity_group", "unit"]
     grp = df.groupby(group_cols, as_index=False).agg(
         demand=("baseline_amount", "sum"),
@@ -194,25 +274,8 @@ sample_files = {
     "샘플 3 - 제약이 빡빡한 형": DATA_DIR / "sample_supply_chain_case_3_tight_constraints.csv",
 }
 
-guide_df = pd.DataFrame(
-    [
-        ["scope", "문자", "Scope1 / Scope2 / Scope3", "배출 범주"],
-        ["site", "문자", "Plant_A", "사업장명"],
-        ["activity_group", "문자", "Boiler_Heat", "같은 활동 묶음. 이 그룹 안에서 최적 배분이 일어남"],
-        ["option_name", "문자", "Natural_Gas", "개별 선택지 이름"],
-        ["baseline_amount", "숫자", "100", "현재 기준안 사용량 또는 물량"],
-        ["min_amount", "숫자", "20", "최적화 후 최소 사용량"],
-        ["max_amount", "숫자", "140", "최적화 후 최대 사용량"],
-        ["unit", "문자", "MWh / ton / ton-km", "사용 단위"],
-        ["emission_factor_tco2_per_unit", "숫자", "0.22", "단위당 배출계수(tCO2/unit)"],
-        ["cost_per_unit", "숫자", "55", "단위당 비용"],
-        ["description", "문자", "사업장 보일러 열원", "행 설명용 텍스트"],
-    ],
-    columns=["컬럼명", "자료형", "예시", "설명"]
-)
-
 st.title("공급망 기반 탄소배출량 최적화 데모")
-st.write("Scope 1, Scope 2, Scope 3 데이터를 기반으로 총 탄소배출량을 최소화하는 1차 데모 버전입니다.")
+st.write("사용자가 공급망 구조 템플릿을 선택하고, 샘플 또는 업로드 CSV를 기반으로 총 탄소배출량을 최소화하는 1차 데모입니다.")
 
 tab1, tab2, tab3 = st.tabs(["공급망 구조 및 입력", "Scope별 최적화", "결과 및 보고서"])
 
@@ -224,6 +287,19 @@ with tab1:
         SCOPE_LIST,
         default=SCOPE_LIST
     )
+
+    structure_template_name = st.selectbox(
+        "공급망 구조 템플릿 선택",
+        list(STRUCTURE_TEMPLATES.keys())
+    )
+    selected_template = STRUCTURE_TEMPLATES[structure_template_name]
+
+    st.subheader("선택된 공급망 구조 설명")
+    st.info(selected_template["description"])
+
+    st.write("현재 선택된 공급망 구조 노드")
+    for node in selected_template["nodes"]:
+        st.markdown(f"- {node}")
 
     st.subheader("입력 방식")
     sample_choice = st.selectbox("샘플 데이터 선택", list(sample_files.keys()))
@@ -243,28 +319,35 @@ with tab1:
     else:
         st.success(msg)
 
-    filtered_df = cleaned_df[cleaned_df["scope"].isin(selected_scopes)].copy()
+    # 선택된 Scope + 선택된 공급망 구조 템플릿의 activity_group만 사용
+    filtered_df = cleaned_df[
+        cleaned_df["scope"].isin(selected_scopes)
+        & cleaned_df["activity_group"].isin(selected_template["groups"])
+    ].copy()
 
     if filtered_df.empty:
-        st.warning("선택한 Scope에 해당하는 데이터가 없습니다.")
+        st.warning("현재 선택한 Scope/구조 템플릿에 해당하는 데이터가 없습니다.")
         st.stop()
 
     st.subheader("입력 컬럼 설명")
-    st.dataframe(guide_df, use_container_width=True)
+    st.dataframe(GUIDE_DF, use_container_width=True)
 
-    st.subheader("선택된 공급망 데이터")
-    st.dataframe(filtered_df, use_container_width=True)
+    st.subheader("activity_group 설명")
+    st.dataframe(ACTIVITY_GROUP_GUIDE_DF, use_container_width=True)
 
     st.subheader("단위 설명")
     st.markdown(
         """
-        - **MWh**: 전기/연료/열 에너지 사용량
-        - **ton**: 자재 구매량
-        - **ton-km**: 운송 물량 × 운송 거리
-        - **emission_factor_tco2_per_unit**: 각 단위 1개당 탄소배출량
-        - **cost_per_unit**: 각 단위 1개당 비용
+        - **MWh**: 전기/연료/열 에너지 사용량  
+        - **ton**: 자재 구매량  
+        - **ton-km**: 운송 물량 × 운송 거리  
+        - **emission_factor_tco2_per_unit**: 각 단위 1개당 탄소배출량  
+        - **cost_per_unit**: 각 단위 1개당 비용  
         """
     )
+
+    st.subheader("현재 구조 템플릿이 반영된 공급망 데이터")
+    st.dataframe(filtered_df, use_container_width=True)
 
 with tab2:
     st.header("2. Scope별 최적화")
@@ -296,7 +379,7 @@ with tab2:
 
     with sub4:
         st.subheader("통합 최적화 실행")
-        st.write("선택된 Scope 전체를 대상으로 총 탄소배출량을 최소화합니다.")
+        st.write("선택된 Scope 및 공급망 구조 템플릿 전체를 대상으로 총 탄소배출량을 최소화합니다.")
 
         baseline_total_emissions = float(
             (filtered_df["baseline_amount"] * filtered_df["emission_factor_tco2_per_unit"]).sum()
@@ -323,6 +406,7 @@ with tab2:
             result = optimize_total_emissions(filtered_df, budget_increase_pct)
             st.session_state["opt_result"] = result
             st.session_state["selected_scopes"] = selected_scopes
+            st.session_state["selected_template_name"] = structure_template_name
 
             st.subheader("최적화 결과 상태")
             st.write(f"상태: **{result['status']}**")
@@ -347,6 +431,9 @@ with tab3:
             scope_summary = result["scope_summary"]
             activity_summary = result["activity_summary"]
             detail = result["detail"]
+
+            st.subheader("적용된 구조")
+            st.write(f"선택된 공급망 구조 템플릿: **{st.session_state.get('selected_template_name', '-') }**")
 
             st.subheader("총괄 결과")
             c1, c2, c3, c4 = st.columns(4)
