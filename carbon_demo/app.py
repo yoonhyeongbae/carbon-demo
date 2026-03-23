@@ -1,4 +1,5 @@
 from io import StringIO
+import hashlib
 import pandas as pd
 import streamlit as st
 from ortools.linear_solver import pywraplp
@@ -26,7 +27,6 @@ SCOPE_LIST = ["Scope1", "Scope2", "Scope3"]
 
 # --------------------------------------------------
 # 공급망 구조 템플릿
-# 사용자가 UI에서 이 템플릿을 선택하면 해당 activity_group만 최적화 대상에 포함됨
 # --------------------------------------------------
 STRUCTURE_TEMPLATES = {
     "구조 X - 전범위 통합형": {
@@ -106,7 +106,7 @@ GUIDE_DF = pd.DataFrame(
 )
 
 # --------------------------------------------------
-# 앱 내부 기본 샘플 데이터 (파일 업로드 없어도 바로 결과 가능)
+# 앱 내부 기본 샘플 데이터
 # --------------------------------------------------
 SAMPLE_DATA_TEXT = {
     "샘플 1 - 균형형": """scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description
@@ -154,7 +154,7 @@ Scope3,Plant_A,Material_Sourcing,Green_Steel,0,0,5,ton,0.90,810,원자재 구매
 }
 
 # --------------------------------------------------
-# 함수들
+# 함수
 # --------------------------------------------------
 def validate_input_df(df: pd.DataFrame):
     missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
@@ -318,6 +318,12 @@ def optimize_total_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0)
     }
 
 
+def build_signature(df: pd.DataFrame, template_name: str, scopes: list[str]) -> str:
+    csv_text = df.to_csv(index=False)
+    signature_text = csv_text + "|" + template_name + "|" + ",".join(sorted(scopes))
+    return hashlib.md5(signature_text.encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------
 # 제목
 # --------------------------------------------------
@@ -378,13 +384,7 @@ with tab1:
         st.warning("현재 선택한 Scope/구조 템플릿에 해당하는 데이터가 없습니다.")
         st.stop()
 
-    current_signature = (
-        str(pd.util.hash_pandas_object(filtered_df, index=True).sum())
-        + "|"
-        + structure_template_name
-        + "|"
-        + ",".join(selected_scopes)
-    )
+    current_signature = build_signature(filtered_df, structure_template_name, selected_scopes)
 
     if st.session_state.get("data_signature") != current_signature:
         st.session_state["data_signature"] = current_signature
