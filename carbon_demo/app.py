@@ -3,6 +3,7 @@ import hashlib
 import pandas as pd
 import streamlit as st
 import folium
+from folium import plugins
 from streamlit_folium import st_folium
 from ortools.linear_solver import pywraplp
 
@@ -56,7 +57,6 @@ SCOPE1_BOILER_OPTIONS = {
     "Biomethane": {"ef": 0.06, "cost": 92, "unit": "MWh", "desc": "보일러 열원"},
 }
 
-# 사업장 내부 차량 공급망 구조용
 SCOPE1_INTERNAL_VEHICLE_OPTIONS = {
     "Diesel_Internal_Truck": {"ef": 0.00045, "cost": 1.35, "unit": "ton-km", "desc": "사업장 내부 차량 이동"},
     "LNG_Internal_Truck": {"ef": 0.00030, "cost": 1.55, "unit": "ton-km", "desc": "사업장 내부 차량 이동"},
@@ -342,11 +342,8 @@ def build_scope2_power_rows(
         if method == "Grid":
             ef = GRID_REGION_META[procurement_region]["ef"]
             cost = GRID_REGION_META[procurement_region]["cost"]
-            owner_x = owner_lat
-            owner_y = owner_lon
-            if owner_x is None or owner_y is None:
-                owner_x = site_lat
-                owner_y = site_lon
+            owner_x = owner_lat if owner_lat is not None else site_lat
+            owner_y = owner_lon if owner_lon is not None else site_lon
         else:
             ef = SOLAR_META["ef"]
             cost = SOLAR_META["cost"]
@@ -758,6 +755,34 @@ def build_node_points(df: pd.DataFrame, result_df=None, plant_defs=None):
     return pd.DataFrame(points).drop_duplicates(subset=["node", "lat", "lon", "node_type"])
 
 
+def get_route_style(route_scope: str):
+    if route_scope == "Scope1_Internal":
+        return {"dash_array": "14, 10", "prefix": "S1"}
+    if route_scope == "Scope2_Power":
+        return {"dash_array": "3, 12", "prefix": "S2"}
+    return {"dash_array": None, "prefix": "S3"}
+
+
+def add_sequence_label(m, lat, lon, text, color):
+    html = f"""
+    <div style="
+        font-size: 11px;
+        font-weight: bold;
+        color: white;
+        background: {color};
+        border: 1px solid #222;
+        border-radius: 10px;
+        padding: 2px 6px;
+        white-space: nowrap;
+        text-align: center;
+    ">{text}</div>
+    """
+    folium.Marker(
+        [lat, lon],
+        icon=folium.DivIcon(html=html)
+    ).add_to(m)
+
+
 def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, result_mode=False):
     if points_df is None or points_df.empty:
         return folium.Map(location=[20, 110], zoom_start=2, tiles="CartoDB positron")
@@ -793,6 +818,8 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
             weight = 2 + 12 * (flow_amount / max_flow)
             weight = max(2, min(14, weight))
 
+            style = get_route_style(r["route_scope"])
+
             if result_mode:
                 dominant_mode = get_dominant_mode_from_mix(r.get("optimized_mix", ""))
                 if dominant_mode == "":
@@ -818,16 +845,38 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
                     f"current={baseline_mode}"
                 )
 
-            folium.PolyLine(
-                locations=[
-                    [r["origin_lat"], r["origin_lon"]],
-                    [r["destination_lat"], r["destination_lon"]],
-                ],
+            locations = [
+                [r["origin_lat"], r["origin_lon"]],
+                [r["destination_lat"], r["destination_lon"]],
+            ]
+
+            line = folium.PolyLine(
+                locations=locations,
                 color=color,
                 weight=weight,
                 opacity=0.8,
                 tooltip=tooltip_text,
+                dash_array=style["dash_array"],
             ).add_to(m)
+
+            # 방향성 표시
+            try:
+                plugins.PolyLineTextPath(
+                    line,
+                    "▶",
+                    repeat=True,
+                    offset=8,
+                    attributes={"fill": color, "font-weight": "bold", "font-size": "14"},
+                ).add_to(m)
+            except Exception:
+                pass
+
+            # 순서 라벨: Scope1 내부차량 / Scope3 외부공급망만 강조
+            if r["route_scope"] in ["Scope1_Internal", "Scope3_External"]:
+                mid_lat = (float(r["origin_lat"]) + float(r["destination_lat"])) / 2
+                mid_lon = (float(r["origin_lon"]) + float(r["destination_lon"])) / 2
+                seq_label = f"{style['prefix']}-{int(r['sequence_no'])}"
+                add_sequence_label(m, mid_lat, mid_lon, seq_label, color)
 
     return m
 
@@ -841,8 +890,10 @@ def build_default_sample_df():
 
     rows.extend(build_scope1_boiler_rows("plant1", 37.5665, 126.9780, 120.0, ["Natural_Gas", "LPG", "Biomethane"], "Natural_Gas"))
     rows.extend(build_scope1_internal_route_rows("plant1", 37.5665, 126.9780, 1, 37.5610, 126.9750, 37.5700, 126.9850, 25.0, ["Diesel_Internal_Truck", "EV_Internal_Truck"], "Diesel_Internal_Truck"))
+    rows.extend(build_scope1_internal_route_rows("plant1", 37.5665, 126.9780, 2, 37.5580, 126.9700, 37.5675, 126.9920, 18.0, ["Diesel_Internal_Truck", "LNG_Internal_Truck"], "LNG_Internal_Truck"))
     rows.extend(build_scope2_power_rows("plant1", 37.5665, 126.9780, 37.4563, 126.7052, "Region_A", 180.0, ["Grid", "Solar_Onsite"], "Grid"))
     rows.extend(build_scope3_external_rows("plant1", 37.5665, 126.9780, 1, 31.2304, 121.4737, 37.5665, 126.9780, 120.0, ["Truck", "Rail", "Ship"], "Ship"))
+    rows.extend(build_scope3_external_rows("plant1", 37.5665, 126.9780, 2, 35.6762, 139.6503, 37.5665, 126.9780, 80.0, ["Truck", "Rail", "Ship"], "Rail"))
 
     rows.extend(build_scope1_boiler_rows("plant2", 35.1796, 129.0756, 90.0, ["Natural_Gas", "LPG"], "LPG"))
     rows.extend(build_scope1_internal_route_rows("plant2", 35.1796, 129.0756, 1, 35.1700, 129.0600, 35.1900, 129.0850, 18.0, ["Diesel_Internal_Truck", "LNG_Internal_Truck"], "LNG_Internal_Truck"))
@@ -910,7 +961,6 @@ with tab1:
                 "lon": st.session_state[f"plant_{i}_lon"],
             })
 
-        # 사업장별 경로 카운트 초기화
         for p in plant_defs:
             i = p["index"]
             if f"plant_{i}_s1_route_count" not in st.session_state:
@@ -918,7 +968,6 @@ with tab1:
             if f"plant_{i}_s3_route_count" not in st.session_state:
                 st.session_state[f"plant_{i}_s3_route_count"] = 1
 
-        # 미리보기 지도용 데이터
         preview_points = []
         preview_routes = []
 
@@ -932,7 +981,6 @@ with tab1:
                     "info": f"Plant | {p['name']}",
                 })
 
-            # Scope2 owner 미리보기
             if "Scope2" in selected_scopes:
                 if f"{p['name']}_scope2_owner_lat" not in st.session_state:
                     st.session_state[f"{p['name']}_scope2_owner_lat"] = None
@@ -971,10 +1019,9 @@ with tab1:
                             "emissions_tco2": 0.0,
                         })
 
-            # Scope1 내부 차량 미리보기
             if "Scope1" in selected_scopes:
-                s1_route_count = int(st.session_state[f"plant_{p['index']}_s1_route_count"])
-                for j in range(s1_route_count):
+                s1_count = int(st.session_state[f"plant_{p['index']}_s1_route_count"])
+                for j in range(s1_count):
                     if f"{p['name']}_s1_{j}_owner_lat" not in st.session_state:
                         st.session_state[f"{p['name']}_s1_{j}_owner_lat"] = None
                     if f"{p['name']}_s1_{j}_owner_lon" not in st.session_state:
@@ -1030,10 +1077,9 @@ with tab1:
                             "emissions_tco2": 0.0,
                         })
 
-            # Scope3 외부 경로 미리보기
             if "Scope3" in selected_scopes:
-                s3_route_count = int(st.session_state[f"plant_{p['index']}_s3_route_count"])
-                for j in range(s3_route_count):
+                s3_count = int(st.session_state[f"plant_{p['index']}_s3_route_count"])
+                for j in range(s3_count):
                     if f"{p['name']}_s3_{j}_owner_lat" not in st.session_state:
                         st.session_state[f"{p['name']}_s3_{j}_owner_lat"] = None
                     if f"{p['name']}_s3_{j}_owner_lon" not in st.session_state:
@@ -1184,7 +1230,6 @@ with tab1:
                     st.session_state["pending_pick"] = f"plant|{p['index']}"
                     st.rerun()
 
-                # ---------------- Scope1 ----------------
                 if "Scope1" in selected_scopes:
                     st.write("#### Scope 1")
                     st.caption("Scope1 위치는 사업장 위치와 동일하게 적용됩니다.")
@@ -1292,7 +1337,6 @@ with tab1:
                             )
                         )
 
-                # ---------------- Scope2 ----------------
                 if "Scope2" in selected_scopes:
                     st.write("#### Scope 2")
                     st.caption("Scope2 client 위치는 사업장 위치와 동일합니다. 전기 owner 위치만 별도로 지도에서 선택합니다.")
@@ -1346,7 +1390,6 @@ with tab1:
                         )
                     )
 
-                # ---------------- Scope3 ----------------
                 if "Scope3" in selected_scopes:
                     st.write("#### Scope 3")
                     s3_count = st.number_input(
@@ -1421,9 +1464,6 @@ with tab1:
                             )
                         )
 
-    # ----------------------------
-    # 데이터 생성 / 업로드 우선순위
-    # ----------------------------
     if uploaded_file is not None:
         raw_df = pd.read_csv(uploaded_file)
         raw_df = ensure_optional_columns(raw_df)
