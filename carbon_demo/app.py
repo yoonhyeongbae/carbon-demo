@@ -310,12 +310,8 @@ with tab1:
         raw_df = pd.read_csv(uploaded_file)
         st.info("현재 업로드한 CSV 파일을 사용 중입니다.")
     else:
-        sample_path = sample_files[sample_choice]
-        if not sample_path.exists():
-            st.error(f"샘플 파일을 찾을 수 없습니다: {sample_path.name}")
-            st.stop()
-        raw_df = pd.read_csv(sample_path)
-        st.info(f"현재 {sample_choice} 데이터를 사용 중입니다.")
+        raw_df = pd.read_csv(StringIO(SAMPLE_DATA_TEXT[sample_choice]))
+        st.info(f"현재 {sample_choice} 기본 내장 데이터를 사용 중입니다.")
 
     is_valid, msg, cleaned_df = validate_input_df(raw_df)
     if not is_valid:
