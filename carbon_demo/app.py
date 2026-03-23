@@ -1,4 +1,3 @@
-from pathlib import Path
 from io import StringIO
 import pandas as pd
 import streamlit as st
@@ -6,6 +5,9 @@ from ortools.linear_solver import pywraplp
 
 st.set_page_config(page_title="공급망 기반 탄소배출량 최적화 데모", layout="wide")
 
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
 REQUIRED_COLS = [
     "scope",
     "site",
@@ -23,12 +25,12 @@ REQUIRED_COLS = [
 SCOPE_LIST = ["Scope1", "Scope2", "Scope3"]
 
 # --------------------------------------------------
-# 공급망 구조 템플릿 정의
-# 사용자가 UI에서 이것을 선택하면 최적화 대상 구조가 바뀜
+# 공급망 구조 템플릿
+# 사용자가 UI에서 이 템플릿을 선택하면 해당 activity_group만 최적화 대상에 포함됨
 # --------------------------------------------------
 STRUCTURE_TEMPLATES = {
     "구조 X - 전범위 통합형": {
-        "description": "직접배출 + 구매전력 + 운송 + 원자재 조달을 모두 포함하는 구조",
+        "description": "직접배출 + 구매전력 + 원자재 운송 + 원자재 조달을 모두 포함하는 구조",
         "groups": [
             "Boiler_Heat",
             "Electricity_Procurement",
@@ -71,7 +73,7 @@ STRUCTURE_TEMPLATES = {
 }
 
 # --------------------------------------------------
-# activity_group 설명용 표
+# activity_group 설명
 # --------------------------------------------------
 ACTIVITY_GROUP_GUIDE_DF = pd.DataFrame(
     [
@@ -84,7 +86,7 @@ ACTIVITY_GROUP_GUIDE_DF = pd.DataFrame(
 )
 
 # --------------------------------------------------
-# 컬럼 설명 표
+# 입력 컬럼 설명
 # --------------------------------------------------
 GUIDE_DF = pd.DataFrame(
     [
@@ -103,7 +105,57 @@ GUIDE_DF = pd.DataFrame(
     columns=["컬럼명", "자료형", "예시", "설명"]
 )
 
+# --------------------------------------------------
+# 앱 내부 기본 샘플 데이터 (파일 업로드 없어도 바로 결과 가능)
+# --------------------------------------------------
+SAMPLE_DATA_TEXT = {
+    "샘플 1 - 균형형": """scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description
+Scope1,Plant_A,Boiler_Heat,Natural_Gas,100,20,140,MWh,0.22,55,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,LPG,20,0,60,MWh,0.27,68,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,Biomethane,0,0,80,MWh,0.06,92,사업장 보일러 열원
+Scope2,Plant_A,Electricity_Procurement,Grid,180,50,220,MWh,0.45,100,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Green_PPA,20,0,140,MWh,0.05,130,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Solar_Onsite,0,0,60,MWh,0.02,145,구매 전력
+Scope3,Plant_A,Inbound_Transport,Truck,260,50,320,ton-km,0.00018,1.20,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Rail,40,0,220,ton-km,0.00006,1.60,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Ship,0,0,100,ton-km,0.00004,1.55,원자재 운송
+Scope3,Plant_A,Material_Sourcing,Standard_Steel,90,30,120,ton,1.90,650,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Recycled_Steel,10,0,80,ton,1.10,720,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Green_Steel,0,0,40,ton,0.90,790,원자재 구매
+""",
+    "샘플 2 - 친환경 유연형": """scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description
+Scope1,Plant_A,Boiler_Heat,Natural_Gas,70,10,100,MWh,0.22,55,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,LPG,10,0,30,MWh,0.27,68,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,Biomethane,40,0,140,MWh,0.06,88,사업장 보일러 열원
+Scope2,Plant_A,Electricity_Procurement,Grid,120,20,160,MWh,0.45,100,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Green_PPA,50,0,200,MWh,0.05,125,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Solar_Onsite,30,0,120,MWh,0.02,140,구매 전력
+Scope3,Plant_A,Inbound_Transport,Truck,180,30,220,ton-km,0.00018,1.20,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Rail,80,0,260,ton-km,0.00006,1.55,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Ship,40,0,180,ton-km,0.00004,1.50,원자재 운송
+Scope3,Plant_A,Material_Sourcing,Standard_Steel,60,10,80,ton,1.90,650,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Recycled_Steel,25,0,120,ton,1.10,710,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Green_Steel,15,0,90,ton,0.90,770,원자재 구매
+""",
+    "샘플 3 - 제약이 빡빡한 형": """scope,site,activity_group,option_name,baseline_amount,min_amount,max_amount,unit,emission_factor_tco2_per_unit,cost_per_unit,description
+Scope1,Plant_A,Boiler_Heat,Natural_Gas,110,80,120,MWh,0.22,55,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,LPG,10,0,20,MWh,0.27,68,사업장 보일러 열원
+Scope1,Plant_A,Boiler_Heat,Biomethane,0,0,10,MWh,0.06,95,사업장 보일러 열원
+Scope2,Plant_A,Electricity_Procurement,Grid,190,160,210,MWh,0.45,100,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Green_PPA,10,0,25,MWh,0.05,132,구매 전력
+Scope2,Plant_A,Electricity_Procurement,Solar_Onsite,0,0,15,MWh,0.02,150,구매 전력
+Scope3,Plant_A,Inbound_Transport,Truck,280,240,300,ton-km,0.00018,1.20,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Rail,20,0,40,ton-km,0.00006,1.65,원자재 운송
+Scope3,Plant_A,Inbound_Transport,Ship,0,0,10,ton-km,0.00004,1.60,원자재 운송
+Scope3,Plant_A,Material_Sourcing,Standard_Steel,95,85,100,ton,1.90,650,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Recycled_Steel,5,0,15,ton,1.10,730,원자재 구매
+Scope3,Plant_A,Material_Sourcing,Green_Steel,0,0,5,ton,0.90,810,원자재 구매
+"""
+}
 
+# --------------------------------------------------
+# 함수들
+# --------------------------------------------------
 def validate_input_df(df: pd.DataFrame):
     missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
     if missing_cols:
@@ -266,20 +318,17 @@ def optimize_total_emissions(df: pd.DataFrame, budget_increase_pct: float = 5.0)
     }
 
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-
-sample_files = {
-    "샘플 1 - 균형형": DATA_DIR / "sample_supply_chain_case_1_balanced.csv",
-    "샘플 2 - 친환경 유연형": DATA_DIR / "sample_supply_chain_case_2_green_flexible.csv",
-    "샘플 3 - 제약이 빡빡한 형": DATA_DIR / "sample_supply_chain_case_3_tight_constraints.csv",
-}
-
+# --------------------------------------------------
+# 제목
+# --------------------------------------------------
 st.title("공급망 기반 탄소배출량 최적화 데모")
-st.write("사용자가 공급망 구조 템플릿을 선택하고, 샘플 또는 업로드 CSV를 기반으로 총 탄소배출량을 최소화하는 1차 데모입니다.")
+st.write("사용자가 공급망 구조 템플릿을 선택하고, 기본 내장 샘플 데이터 또는 업로드 CSV를 기반으로 총 탄소배출량을 최소화하는 데모입니다.")
 
 tab1, tab2, tab3 = st.tabs(["공급망 구조 및 입력", "Scope별 최적화", "결과 및 보고서"])
 
+# --------------------------------------------------
+# Tab 1
+# --------------------------------------------------
 with tab1:
     st.header("1. 공급망 구조 및 입력")
 
@@ -303,7 +352,7 @@ with tab1:
         st.markdown(f"- {node}")
 
     st.subheader("입력 방식")
-    sample_choice = st.selectbox("샘플 데이터 선택", list(sample_files.keys()))
+    sample_choice = st.selectbox("샘플 데이터 선택", list(SAMPLE_DATA_TEXT.keys()))
     uploaded_file = st.file_uploader("사용자 CSV 업로드", type=["csv"])
 
     if uploaded_file is not None:
@@ -320,7 +369,6 @@ with tab1:
     else:
         st.success(msg)
 
-    # 선택된 Scope + 선택된 공급망 구조 템플릿의 activity_group만 사용
     filtered_df = cleaned_df[
         cleaned_df["scope"].isin(selected_scopes)
         & cleaned_df["activity_group"].isin(selected_template["groups"])
@@ -329,6 +377,18 @@ with tab1:
     if filtered_df.empty:
         st.warning("현재 선택한 Scope/구조 템플릿에 해당하는 데이터가 없습니다.")
         st.stop()
+
+    current_signature = (
+        str(pd.util.hash_pandas_object(filtered_df, index=True).sum())
+        + "|"
+        + structure_template_name
+        + "|"
+        + ",".join(selected_scopes)
+    )
+
+    if st.session_state.get("data_signature") != current_signature:
+        st.session_state["data_signature"] = current_signature
+        st.session_state.pop("opt_result", None)
 
     st.subheader("입력 컬럼 설명")
     st.dataframe(GUIDE_DF, use_container_width=True)
@@ -350,6 +410,9 @@ with tab1:
     st.subheader("현재 구조 템플릿이 반영된 공급망 데이터")
     st.dataframe(filtered_df, use_container_width=True)
 
+# --------------------------------------------------
+# Tab 2
+# --------------------------------------------------
 with tab2:
     st.header("2. Scope별 최적화")
     sub1, sub2, sub3, sub4 = st.tabs(["Scope 1", "Scope 2", "Scope 3", "통합 최적화 실행"])
@@ -401,7 +464,7 @@ with tab2:
             step=1
         )
 
-        run_opt = st.button("통합 최적화 실행")
+        run_opt = st.button("통합 최적화 실행", key="run_integrated_optimization")
 
         if run_opt:
             result = optimize_total_emissions(filtered_df, budget_increase_pct)
@@ -417,6 +480,9 @@ with tab2:
             else:
                 st.success("최적화를 완료했습니다. 결과 및 보고서 탭에서 상세 결과를 확인하세요.")
 
+# --------------------------------------------------
+# Tab 3
+# --------------------------------------------------
 with tab3:
     st.header("3. 결과 및 보고서")
 
@@ -434,7 +500,7 @@ with tab3:
             detail = result["detail"]
 
             st.subheader("적용된 구조")
-            st.write(f"선택된 공급망 구조 템플릿: **{st.session_state.get('selected_template_name', '-') }**")
+            st.write(f"선택된 공급망 구조 템플릿: **{st.session_state.get('selected_template_name', '-')}**")
 
             st.subheader("총괄 결과")
             c1, c2, c3, c4 = st.columns(4)
