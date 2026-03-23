@@ -756,25 +756,44 @@ def build_node_points(df: pd.DataFrame, result_df=None, plant_defs=None):
 
 
 def get_route_style(route_scope: str):
+    """
+    scope별 선 스타일을 더 직관적으로 구분
+    - Scope1 내부차량: 점선(dotted)
+    - Scope2 전력: 긴 대시(dashed)
+    - Scope3 외부공급망: 실선(solid)
+    """
     if route_scope == "Scope1_Internal":
-        return {"dash_array": "14, 10", "prefix": "S1"}
+        return {
+            "dash_array": "2, 14",
+            "prefix": "S1",
+            "weight_scale": 0.95,
+        }
     if route_scope == "Scope2_Power":
-        return {"dash_array": "3, 12", "prefix": "S2"}
-    return {"dash_array": None, "prefix": "S3"}
+        return {
+            "dash_array": "14, 10",
+            "prefix": "S2",
+            "weight_scale": 0.80,
+        }
+    return {
+        "dash_array": None,
+        "prefix": "S3",
+        "weight_scale": 1.15,
+    }
+    
 
-
-def add_sequence_label(m, lat, lon, text, color):
+def add_sequence_label(m, lat, lon, text, border_color):
     html = f"""
     <div style="
         font-size: 11px;
         font-weight: bold;
-        color: white;
-        background: {color};
-        border: 1px solid #222;
+        color: black;
+        background: white;
+        border: 2px solid {border_color};
         border-radius: 10px;
         padding: 2px 6px;
         white-space: nowrap;
         text-align: center;
+        box-shadow: 0 0 3px rgba(0,0,0,0.35);
     ">{text}</div>
     """
     folium.Marker(
@@ -783,9 +802,74 @@ def add_sequence_label(m, lat, lon, text, color):
     ).add_to(m)
 
 
+def interpolate_point(lat1, lon1, lat2, lon2, ratio=0.94):
+    lat = lat1 + (lat2 - lat1) * ratio
+    lon = lon1 + (lon2 - lon1) * ratio
+    return lat, lon
+
+
+def add_endpoint_arrow(m, lat1, lon1, lat2, lon2, color):
+    arrow_lat, arrow_lon = interpolate_point(lat1, lon1, lat2, lon2, ratio=0.94)
+    html = f"""
+    <div style="
+        font-size: 18px;
+        font-weight: bold;
+        color: {color};
+        text-shadow: 0 0 2px white, 0 0 2px white;
+        transform: translate(-50%, -50%);
+    ">▶</div>
+    """
+    folium.Marker(
+        [arrow_lat, arrow_lon],
+        icon=folium.DivIcon(html=html)
+    ).add_to(m)
+
+
+def add_map_legend(m):
+    legend_html = """
+    <div style="
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 9999;
+        background: white;
+        border: 2px solid #555;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+        min-width: 220px;
+    ">
+      <div style="font-weight: bold; margin-bottom: 8px;">지도 범례</div>
+
+      <div style="margin-bottom: 6px; font-weight: bold;">선 종류 (Scope)</div>
+      <div style="display:flex; align-items:center; margin-bottom:4px;">
+        <span style="display:inline-block; width:42px; border-top:4px dotted #444; margin-right:8px;"></span>
+        <span>Scope1 내부차량</span>
+      </div>
+      <div style="display:flex; align-items:center; margin-bottom:4px;">
+        <span style="display:inline-block; width:42px; border-top:4px dashed #444; margin-right:8px;"></span>
+        <span>Scope2 전력</span>
+      </div>
+      <div style="display:flex; align-items:center; margin-bottom:8px;">
+        <span style="display:inline-block; width:42px; border-top:4px solid #444; margin-right:8px;"></span>
+        <span>Scope3 외부공급망</span>
+      </div>
+
+      <div style="margin-bottom: 6px; font-weight: bold;">색상 의미</div>
+      <div style="margin-bottom:2px;">선 색상 = 운송수단 / 조달방식</div>
+      <div style="margin-bottom:2px;">선 굵기 = 물량 크기</div>
+      <div style="margin-bottom:2px;">▶ = 이동 방향(끝점)</div>
+      <div>S1-1 / S3-2 = 순서 라벨</div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
 def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, result_mode=False):
     if points_df is None or points_df.empty:
-        return folium.Map(location=[20, 110], zoom_start=2, tiles="CartoDB positron")
+        m = folium.Map(location=[20, 110], zoom_start=2, tiles="CartoDB positron")
+        add_map_legend(m)
+        return m
 
     center_lat = float(points_df["lat"].mean())
     center_lon = float(points_df["lon"].mean())
@@ -815,10 +899,11 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
                 continue
 
             flow_amount = float(r.get("flow_amount", 0.0))
-            weight = 2 + 12 * (flow_amount / max_flow)
-            weight = max(2, min(14, weight))
-
             style = get_route_style(r["route_scope"])
+
+            base_weight = 2 + 12 * (flow_amount / max_flow)
+            weight = base_weight * style["weight_scale"]
+            weight = max(2, min(16, weight))
 
             if result_mode:
                 dominant_mode = get_dominant_mode_from_mix(r.get("optimized_mix", ""))
@@ -850,36 +935,34 @@ def make_folium_map(points_df: pd.DataFrame, routes_df: pd.DataFrame = None, res
                 [r["destination_lat"], r["destination_lon"]],
             ]
 
-            line = folium.PolyLine(
+            folium.PolyLine(
                 locations=locations,
                 color=color,
                 weight=weight,
-                opacity=0.8,
+                opacity=0.85,
                 tooltip=tooltip_text,
                 dash_array=style["dash_array"],
             ).add_to(m)
 
-            # 방향성 표시
-            try:
-                plugins.PolyLineTextPath(
-                    line,
-                    "▶",
-                    repeat=True,
-                    offset=8,
-                    attributes={"fill": color, "font-weight": "bold", "font-size": "14"},
-                ).add_to(m)
-            except Exception:
-                pass
+            # 화살표는 끝점 근처에만 1개 표시
+            add_endpoint_arrow(
+                m,
+                float(r["origin_lat"]),
+                float(r["origin_lon"]),
+                float(r["destination_lat"]),
+                float(r["destination_lon"]),
+                color
+            )
 
-            # 순서 라벨: Scope1 내부차량 / Scope3 외부공급망만 강조
+            # Scope1 내부차량 / Scope3 외부공급망만 순서 라벨 표시
             if r["route_scope"] in ["Scope1_Internal", "Scope3_External"]:
                 mid_lat = (float(r["origin_lat"]) + float(r["destination_lat"])) / 2
                 mid_lon = (float(r["origin_lon"]) + float(r["destination_lon"])) / 2
                 seq_label = f"{style['prefix']}-{int(r['sequence_no'])}"
                 add_sequence_label(m, mid_lat, mid_lon, seq_label, color)
 
+    add_map_legend(m)
     return m
-
 
 def build_default_sample_df():
     plant_defs = [
@@ -1624,7 +1707,52 @@ with tab3:
             c6.metric("최적 총 비용", f"{total['optimized_cost']:.2f}")
 
             st.subheader("Scope별 분석")
-            st.dataframe(scope_summary, use_container_width=True)
+
+            baseline_scope_view = scope_summary[
+                ["scope", "baseline_amount", "baseline_emissions_tco2", "baseline_cost"]
+            ].rename(
+                columns={
+                    "scope": "Scope",
+                    "baseline_amount": "Baseline Activity",
+                    "baseline_emissions_tco2": "Baseline Emissions (tCO2)",
+                    "baseline_cost": "Baseline Cost",
+                }
+            )
+
+            optimized_scope_view = scope_summary[
+                ["scope", "optimized_amount", "optimized_emissions_tco2", "optimized_cost"]
+            ].rename(
+                columns={
+                    "scope": "Scope",
+                    "optimized_amount": "Optimized Activity",
+                    "optimized_emissions_tco2": "Optimized Emissions (tCO2)",
+                    "optimized_cost": "Optimized Cost",
+                }
+            )
+
+            comparison_scope_view = scope_summary[
+                ["scope", "baseline_emissions_tco2", "optimized_emissions_tco2", "reduction_tco2", "reduction_pct"]
+            ].rename(
+                columns={
+                    "scope": "Scope",
+                    "baseline_emissions_tco2": "Baseline Emissions (tCO2)",
+                    "optimized_emissions_tco2": "Optimized Emissions (tCO2)",
+                    "reduction_tco2": "Reduction (tCO2)",
+                    "reduction_pct": "Reduction (%)",
+                }
+            )
+
+            col_b, col_o = st.columns(2)
+            with col_b:
+                st.markdown("**Baseline 기준**")
+                st.dataframe(baseline_scope_view, use_container_width=True)
+
+            with col_o:
+                st.markdown("**Optimized 기준**")
+                st.dataframe(optimized_scope_view, use_container_width=True)
+
+            st.markdown("**Baseline vs Optimized 비교**")
+            st.dataframe(comparison_scope_view, use_container_width=True)
 
             scope_chart = scope_summary.set_index("scope")[["baseline_emissions_tco2", "optimized_emissions_tco2"]]
             st.bar_chart(scope_chart)
