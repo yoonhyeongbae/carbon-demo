@@ -782,8 +782,13 @@ def solve_model(
         "status": status,
         "backend": result.backend,
         "solver_message": str(result.message),
-        "mip_gap": getattr(result, "mip_gap", np.nan),
-        "objective_value_eur": float(result.fun),
+        "mip_gap": (
+            abs(float(result.objective_value) - float(result.best_bound))
+            / max(1.0, abs(float(result.objective_value)))
+            if result.objective_value is not None and result.best_bound is not None
+            else np.nan
+        ),
+        "objective_value_eur": float(result.objective_value),
         "production_mode": production_mode,
         "scenario_id": scenario_id,
         "scenario_name": scenario["scenario_name"],
