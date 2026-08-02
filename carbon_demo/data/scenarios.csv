@@ -1,0 +1,4 @@
+﻿scenario_id,scenario_name,minimum_score,apply_carbon_cap,small_cap_kgco2_per_vehicle,standard_cap_kgco2_per_vehicle,source_basis
+S1,시나리오 ① 현행 보조금 기준,60,1,8750,14250,Word 60-point subsidy criterion and derived caps stated in Word
+S2,시나리오 ② 탄소배출 기준 없음,0,0,,,Poster scenario ②
+S3,시나리오 ③ 보조금 점수 65점 이상,65,1,8062.5,13687.5,Poster scenario ③; cap derived from Word linear score ranges

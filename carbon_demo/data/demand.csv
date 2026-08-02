@@ -1,0 +1,7 @@
+﻿product_id,market_id,demand_units,source_basis
+small_mid,FR,9720,Word paragraphs 11-16
+small_long,FR,1080,Word paragraphs 11-16
+medium_mid,FR,3240,Word paragraphs 11-16
+medium_long,FR,2160,Word paragraphs 11-16
+large_mid,FR,540,Word paragraphs 11-16
+large_long,FR,1260,Word paragraphs 11-16
