@@ -1,0 +1,17 @@
+방식 C: Streamlit 실행 후 아래 9개 CSV를 모두 한 번에 업로드하십시오.
+
+1. products.csv
+2. demand.csv
+3. raw_material_suppliers.csv
+4. assembly_locations.csv
+5. transport_parameters.csv
+6. markets.csv
+7. scenarios.csv
+8. poster_benchmark_cost_ratios.csv
+9. poster_benchmark_quartiles.csv
+
+주의:
+- 파일명을 바꾸지 마십시오.
+- app.py의 계산에는 내장 CSV가 사용되지 않습니다.
+- data 폴더의 CSV는 입력 템플릿 다운로드용입니다.
+- assets/poster_reference.png는 포스터 원본 그림 출력용입니다.

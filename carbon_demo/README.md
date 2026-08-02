@@ -1,36 +1,51 @@
-\# carbon\_demo
+# 전기차 보조금 공급망 최적화 SaaS — OR-Tools 버전
 
+## 최적화 엔진
 
+- Google OR-Tools `pywraplp.MPSolver` (`ortools==9.15.6755`)
+- 우선 solver: `SCIP`
+- 대체 solver: `CBC`
+- 기존 `GLOP`은 연속 LP 전용이므로 이 Word MILP 모형에는 사용하지 않습니다.
 
-조직경계 기반 탄소배출 프레임워크에서 탄소배출량 산정 및 최적화를 위한 웹 기반 SaaS 소프트웨어 데모 버전
+## 입력 방식
 
+이 버전은 **방식 C** 전용입니다. 계산에 내장 기본 CSV를 사용하지 않으며, 앱을 열 때 아래 9개 CSV를 모두 업로드해야 합니다.
 
-\# 주요 기능
+1. `products.csv`
+2. `demand.csv`
+3. `raw_material_suppliers.csv`
+4. `assembly_locations.csv`
+5. `transport_parameters.csv`
+6. `markets.csv`
+7. `scenarios.csv`
+8. `poster_benchmark_cost_ratios.csv`
+9. `poster_benchmark_quartiles.csv`
 
-\- 샘플 CSV 데이터 읽기
-\- 기준 탄소배출량 계산
-\- OR-Tools 기반 최적화
-\- 기준안과 최적안 비교 표시
+`data/` 폴더의 CSV는 앱의 템플릿 ZIP 다운로드 기능에만 사용됩니다.
 
+## 파일 배치
 
-\# 해야할 일
+```text
+repository-root/
+├── packages.txt
+└── carbon_demo/
+    ├── app.py
+    ├── requirements.txt
+    ├── README.md
+    ├── UPLOAD_CHECKLIST.txt
+    ├── data/
+    │   └── 9개 CSV
+    └── assets/
+        └── poster_reference.png
+```
 
-\# 사용자 실행 방법 웹 앞부분에 내용 추가 (추후 업데이트 될 예정)
-1. 배포된 streamlit 주소 접속
-2. 사용자 소유 CSV 파일 업로드
-3. 최적화 버튼 클릭
-4. 결과 확인
+## 로컬 실행
 
-\# 탄소배출 Framework 설명 
-1. 조직경계 설명
-2. 최적화 대상
+```bash
+python -m venv .venv
+.venv\\Scripts\\activate
+python -m pip install -r carbon_demo/requirements.txt
+streamlit run carbon_demo/app.py
+```
 
-\# 데이터 부분
-1. 사용자에게 각 항목별 자료형, 단위, 필수여부 여부 정의 및 설명
-1. 데이터 전처리 기능
-2. 데이터 전처리 과정에서 발생하는 결과 사용자에게 전달 기능 (단위 변환/missing data,...)
-
-\# 결과 부분
-1. 사용자 결과 옵션 선택
-2. 필요한 옵션 코드 추가
-3. 결과 report 다운로드 기능 추가
+Linux/macOS에서는 가상환경 활성화 명령을 `source .venv/bin/activate`로 사용합니다.

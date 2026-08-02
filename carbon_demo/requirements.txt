@@ -1,5 +1,8 @@
-streamlit
-pandas
-ortools
-folium
-streamlit-folium
+streamlit>=1.35
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+folium>=0.15
+streamlit-folium>=0.20
+geopy>=2.4
+ortools==9.15.6755
