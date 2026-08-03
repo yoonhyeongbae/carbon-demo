@@ -23,8 +23,8 @@ from streamlit_folium import st_folium
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
-APP_BUILD = "strategic-lp-split-transport-v6.1"
-APP_PACKAGE_ID = "20260803-2010-KST"
+APP_BUILD = "strategic-lp-product-route-maps-v6.2"
+APP_PACKAGE_ID = "20260803-2023-KST"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -1091,33 +1091,87 @@ def solve_model(
 # -----------------------------------------------------------------------------
 # Visualization
 # -----------------------------------------------------------------------------
-def render_supply_chain_map(result: Dict):
+def render_supply_chain_map(result: Dict, product_id: str | None = None):
+    """Render one optimized supply-chain map, optionally filtered to one vehicle trim.
+
+    The optimization model remains unchanged. This function only filters the solved
+    route tables so the user can inspect each mid/long-range vehicle separately.
+    """
     suppliers = result["tables_snapshot"]["suppliers"].set_index("supplier_id")
     plants = result["tables_snapshot"]["plants"].set_index("plant_id")
+    suppliers.index = suppliers.index.astype(str)
+    plants.index = plants.index.astype(str)
     market = result["tables_snapshot"]["market"]
-    raw = result["raw_routes"]
-    final = result["final_routes"]
+    raw_all = result["raw_routes"]
+    final_all = result["final_routes"]
 
-    all_lats = list(suppliers["latitude"]) + list(plants["latitude"]) + [float(market["latitude"])]
-    all_lons = list(suppliers["longitude"]) + list(plants["longitude"]) + [float(market["longitude"])]
-    m = folium.Map(location=[np.mean(all_lats), np.mean(all_lons)], zoom_start=2, tiles="CartoDB positron")
+    if product_id is None:
+        raw = raw_all.copy()
+        final = final_all.copy()
+        selected_product_name = "전체 선택 제품"
+    else:
+        raw = raw_all[raw_all["product_id"].astype(str) == str(product_id)].copy() if not raw_all.empty else raw_all.copy()
+        final = final_all[final_all["product_id"].astype(str) == str(product_id)].copy() if not final_all.empty else final_all.copy()
+        product_lookup = result["product_summary"].set_index("product_id")["product_name"].to_dict()
+        selected_product_name = str(product_lookup.get(product_id, product_id))
+
+    if raw.empty and final.empty:
+        st.warning(f"{selected_product_name}의 양(+)의 최적 경로가 없습니다.")
+        return
+
+    used_supplier_ids = set(raw["supplier_id"].astype(str)) if not raw.empty else set()
+    used_plant_ids = set()
+    if not raw.empty:
+        used_plant_ids.update(raw["plant_id"].astype(str))
+    if not final.empty:
+        used_plant_ids.update(final["plant_id"].astype(str))
+
+    coordinate_lats = [float(market["latitude"])]
+    coordinate_lons = [float(market["longitude"])]
+    for sid in used_supplier_ids:
+        if sid in suppliers.index:
+            coordinate_lats.append(float(suppliers.loc[sid, "latitude"]))
+            coordinate_lons.append(float(suppliers.loc[sid, "longitude"]))
+    for pid in used_plant_ids:
+        if pid in plants.index:
+            coordinate_lats.append(float(plants.loc[pid, "latitude"]))
+            coordinate_lons.append(float(plants.loc[pid, "longitude"]))
+
+    m = folium.Map(
+        location=[float(np.mean(coordinate_lats)), float(np.mean(coordinate_lons))],
+        zoom_start=2,
+        tiles="CartoDB positron",
+    )
     Fullscreen().add_to(m)
 
-    used_supplier_ids = set(raw["supplier_id"]) if not raw.empty else set()
-    used_plant_ids = set(pd.concat([raw["plant_id"], final["plant_id"]], ignore_index=True)) if (not raw.empty or not final.empty) else set()
-
-    for sid in used_supplier_ids:
+    for sid in sorted(used_supplier_ids):
+        if sid not in suppliers.index:
+            continue
         r = suppliers.loc[sid]
         folium.CircleMarker(
-            [r["latitude"], r["longitude"]], radius=6, color="#333333", fill=True,
+            [r["latitude"], r["longitude"]],
+            radius=6,
+            color="#333333",
+            fill=True,
+            fill_color="#ffffff",
+            fill_opacity=0.95,
             tooltip=f"공급지: {r['location_name']} ({MATERIAL_LABEL.get(r['material_id'], r['material_id'])})",
         ).add_to(m)
-    for pid in used_plant_ids:
+
+    for pid in sorted(used_plant_ids):
+        if pid not in plants.index:
+            continue
         r = plants.loc[pid]
         folium.CircleMarker(
-            [r["latitude"], r["longitude"]], radius=7, color="#111111", fill=True, fill_color="#fdae61",
+            [r["latitude"], r["longitude"]],
+            radius=7,
+            color="#111111",
+            fill=True,
+            fill_color="#fdae61",
+            fill_opacity=0.95,
             tooltip=f"조립지: {r['location_name']}",
         ).add_to(m)
+
     folium.Marker(
         [market["latitude"], market["longitude"]],
         icon=folium.Icon(color="red", icon="star"),
@@ -1126,43 +1180,69 @@ def render_supply_chain_map(result: Dict):
 
     max_raw = float(raw["flow_kg"].max()) if not raw.empty else 1.0
     for _, r in raw.iterrows():
-        s = suppliers.loc[r["supplier_id"]]
-        p = plants.loc[r["plant_id"]]
-        weight = 1.0 + 7.0 * math.sqrt(float(r["flow_kg"]) / max_raw)
+        sid = str(r["supplier_id"])
+        pid = str(r["plant_id"])
+        if sid not in suppliers.index or pid not in plants.index:
+            continue
+        s = suppliers.loc[sid]
+        p = plants.loc[pid]
+        weight = 1.0 + 7.0 * math.sqrt(float(r["flow_kg"]) / max(max_raw, 1e-12))
+        tooltip = (
+            f"{r['product_name']} | {r['material_name']} | "
+            f"{r['supplier_location']} → {r['plant_location']} | "
+            f"{r['transport_mode_ko']} | {r['flow_kg']:,.1f} kg"
+        )
         folium.PolyLine(
             [[s["latitude"], s["longitude"]], [p["latitude"], p["longitude"]]],
-            color=MATERIAL_COLOR[r["material_id"]], weight=weight, opacity=0.65,
+            color=MATERIAL_COLOR[r["material_id"]],
+            weight=weight,
+            opacity=0.72,
             dash_array=TRANSPORT_DASH.get(r["transport_mode"]),
-            tooltip=(f"{r['product_name']} | {r['material_name']} | {r['supplier_location']} → {r['plant_location']} | "
-                     f"{r['transport_mode_ko']} | {r['flow_kg']:,.0f} kg"),
+            tooltip=tooltip,
+            popup=folium.Popup(tooltip, max_width=430),
         ).add_to(m)
 
     max_final = float(final["transport_mass_kg"].max()) if not final.empty else 1.0
     for _, r in final.iterrows():
-        p = plants.loc[r["plant_id"]]
-        weight = 2.0 + 7.0 * math.sqrt(float(r["transport_mass_kg"]) / max_final)
+        pid = str(r["plant_id"])
+        if pid not in plants.index:
+            continue
+        p = plants.loc[pid]
+        weight = 2.0 + 7.0 * math.sqrt(float(r["transport_mass_kg"]) / max(max_final, 1e-12))
+        tooltip = (
+            f"완제품 {r['product_name']} | {r['plant_location']} → {r['market_name']} | "
+            f"{r['transport_mode_ko']} | {r['vehicle_units']:,.2f}대 등가물량"
+        )
         folium.PolyLine(
             [[p["latitude"], p["longitude"]], [market["latitude"], market["longitude"]]],
-            color=MATERIAL_COLOR["finished"], weight=weight, opacity=0.7,
+            color=MATERIAL_COLOR["finished"],
+            weight=weight,
+            opacity=0.78,
             dash_array=TRANSPORT_DASH.get(r["transport_mode"]),
-            tooltip=(f"완제품 {r['product_name']} | {r['plant_location']} → {r['market_name']} | "
-                     f"{r['transport_mode_ko']} | {r['vehicle_units']:,.0f}대"),
+            tooltip=tooltip,
+            popup=folium.Popup(tooltip, max_width=430),
         ).add_to(m)
 
-    legend = """
+    legend = f"""
     <div style='position:fixed; bottom:20px; left:20px; z-index:9999; background:white;
       padding:10px 12px; border:1px solid #777; border-radius:6px; font-size:12px;'>
-      <b>공급망 지도 범례</b><br>
+      <b>{selected_product_name} 공급망</b><br>
       <span style='color:#d73027'>━━</span> 철강 &nbsp;
       <span style='color:#fc8d59'>━━</span> 알루미늄<br>
       <span style='color:#91cf60'>━━</span> 기타 원자재 &nbsp;
       <span style='color:#4575b4'>━━</span> 배터리<br>
       <span style='color:#542788'>━━</span> 완제품 운송<br>
-      선 굵기 = 물량, 선 패턴 = 운송수단
+      선 굵기 = 해당 지도 내 상대 물량<br>
+      선 패턴 = 운송수단 · 선 클릭 = 상세정보
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend))
-    st_folium(m, use_container_width=True, height=650)
+    st_folium(
+        m,
+        key=f"supply_chain_map_{product_id or 'all'}",
+        use_container_width=True,
+        height=650,
+    )
 
 
 def pie_figure(values: Dict[str, float], title: str):
@@ -1500,7 +1580,41 @@ def main():
                 st.pyplot(pie_figure(result["emission_breakdown"], "총 탄소배출량 구성"), use_container_width=True)
 
             st.subheader("최적 공급망 지도")
-            render_supply_chain_map(result)
+            st.caption(
+                "차량 트림을 선택하면 해당 미드/롱 차량에 실제로 배분된 "
+                "원자재·배터리 공급 경로와 완제품 운송 경로만 지도에 표시됩니다."
+            )
+            map_products = result["product_summary"][["product_id", "product_name"]].drop_duplicates().copy()
+            map_product_options = dict(zip(map_products["product_name"], map_products["product_id"]))
+            selected_map_product_name = st.selectbox(
+                "지도에서 확인할 차량 트림",
+                options=list(map_product_options.keys()),
+                key="output_map_product_name",
+            )
+            selected_map_product_id = map_product_options[selected_map_product_name]
+
+            selected_product_row = result["product_summary"][
+                result["product_summary"]["product_id"].astype(str) == str(selected_map_product_id)
+            ].iloc[0]
+            selected_raw_routes = result["raw_routes"][
+                result["raw_routes"]["product_id"].astype(str) == str(selected_map_product_id)
+            ] if not result["raw_routes"].empty else result["raw_routes"]
+            selected_final_routes = result["final_routes"][
+                result["final_routes"]["product_id"].astype(str) == str(selected_map_product_id)
+            ] if not result["final_routes"].empty else result["final_routes"]
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("선택 차량 수요", f"{selected_product_row['demand_units']:,.0f}대")
+            mc2.metric("사용 공급지", f"{selected_raw_routes['supplier_id'].nunique() if not selected_raw_routes.empty else 0}개")
+            used_plants = set(selected_raw_routes["plant_id"].astype(str)) if not selected_raw_routes.empty else set()
+            if not selected_final_routes.empty:
+                used_plants.update(selected_final_routes["plant_id"].astype(str))
+            mc3.metric("사용 조립지", f"{len(used_plants)}개")
+            mc4.metric(
+                "차량당 탄소발자국",
+                f"{selected_product_row['emissions_per_vehicle_kgco2']:,.0f} kg CO₂-eq",
+            )
+            render_supply_chain_map(result, product_id=selected_map_product_id)
 
             st.subheader("공급지·조립지 배분")
             col3, col4 = st.columns(2)
