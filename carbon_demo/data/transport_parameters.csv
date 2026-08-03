@@ -1,14 +1,5 @@
-﻿transport_mode,region_class,transport_ef_kgco2_per_kgkm,transport_cost_eur_per_kgkm,source_basis
-sea,world,0.000101,9.3e-06,Word sea transport table
-air,world,0.00121,0.001,Word transport table
-road,Africa,0.000414,0.0006,Word transport table
-road,Americas,0.000318,0.0005,Word transport table
-road,Asia,0.000377,0.00055,Word transport table
-road,Europe_ex_France,0.000256,0.00035,Word transport table
-road,France,0.000208,0.0003,Word transport table
-road,Oceania,0.000386,0.00058,Word transport table
-rail,Africa,4.5e-05,8e-05,Word transport table
-rail,Asia,4.1e-05,7e-05,Word transport table
-rail,Europe_ex_France,2.3e-05,5e-05,Word transport table
-rail,France,1e-05,4e-05,Word transport table
-rail,Other,3.8e-05,6e-05,Word transport table
+xpress_mode_index,transport_mode,transport_mode_ko,transport_cost_eur_per_unitkm,transport_ef_kgco2_per_unitkm,economically_available,source_basis
+1,sea,해상,9.3e-06,0.000101,1,Xpress RT/FT objective coefficients; sea/air EF from Word; mode 3/4 retain Xpress prohibitive cost
+2,air,항공,0.001,0.00121,1,Xpress RT/FT objective coefficients; sea/air EF from Word; mode 3/4 retain Xpress prohibitive cost
+3,road_disabled,도로(비활성),1000000.0,0.000256,0,Xpress RT/FT objective coefficients; sea/air EF from Word; mode 3/4 retain Xpress prohibitive cost
+4,rail_disabled,철도(비활성),1000000.0,2.3e-05,0,Xpress RT/FT objective coefficients; sea/air EF from Word; mode 3/4 retain Xpress prohibitive cost
