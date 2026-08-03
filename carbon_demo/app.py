@@ -6,7 +6,7 @@ import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import folium
 import matplotlib.pyplot as plt
@@ -58,8 +58,6 @@ TRANSPORT_DASH = {"sea": None, "air": "2,8", "road": "8,5", "rail": "1,5"}
 
 # 첫 번째 PDF의 철강·알루미늄 탄소발자국 식에 제시된 손실률입니다.
 MATERIAL_LOSS_RATE = 0.30
-APP_BUILD = "route-binary-thread1-progress-v4"
-
 CAP_APPLICATION_LABEL = {
     "class_average": "포스터 재현: 차급별 수요가중 평균 탄소상한",
     "product_strict": "PDF 엄격 적용: 각 트림별 개별 차량 탄소상한",
@@ -82,25 +80,6 @@ def configure_matplotlib_font():
 
 
 configure_matplotlib_font()
-
-
-ProgressCallback = Optional[Callable[[int, str, str], None]]
-
-
-def emit_progress(
-    callback: ProgressCallback,
-    percent: int,
-    stage: str,
-    detail: str = "",
-) -> None:
-    """UI와 독립적으로 단계 진행률을 전달합니다.
-
-    OR-Tools MPSolver의 Solve() 호출 내부에서는 실시간 노드 진행률을
-    직접 받을 수 없으므로, 이 콜백은 입력 검증·모형 생성·Solver 실행·
-    결과 정리의 작업 단계 진행률을 제공합니다.
-    """
-    if callback is not None:
-        callback(max(0, min(100, int(percent))), str(stage), str(detail))
 
 
 # -----------------------------------------------------------------------------
@@ -297,7 +276,6 @@ def get_transport_parameter(tp: pd.DataFrame, mode: str, region: str) -> Tuple[f
     return float(r["transport_cost_eur_per_kgkm"]), float(r["transport_ef_kgco2_per_kgkm"])
 
 
-@st.cache_data(show_spinner=False)
 def distance_km(lat1, lon1, lat2, lon2) -> float:
     return float(geodesic((float(lat1), float(lon1)), (float(lat2), float(lon2))).km)
 
@@ -356,13 +334,7 @@ class MilpBuilder:
                 return solver, label
         return None, "OR-Tools MIP solver unavailable"
 
-    def solve(
-        self,
-        time_limit_sec: int = 60,
-        mip_gap: float = 0.01,
-        progress_callback: ProgressCallback = None,
-    ):
-        emit_progress(progress_callback, 64, "Solver 초기화", "SCIP 우선, CBC 대체")
+    def solve(self, time_limit_sec: int = 60):
         solver, backend = self._create_solver()
         if solver is None:
             return SimpleNamespace(
@@ -380,24 +352,14 @@ class MilpBuilder:
             )
 
         solver.SetTimeLimit(max(1, int(time_limit_sec)) * 1000)
-
-        # Streamlit Community Cloud의 CPU 사용량을 낮추기 위해 Solver를
-        # 명시적으로 단일 스레드로 제한합니다. 지원하지 않는 backend에서는
-        # 예외를 무시하고 해당 Solver의 기본 동작을 사용합니다.
-        try:
-            solver.SetNumThreads(1)
-        except Exception:
-            pass
-
-        # mip_gap은 상대 optimality gap입니다. 0.01은 incumbent와 best bound의
-        # 상대 차이가 1% 이내이면 실용적으로 충분한 해로 종료할 수 있음을 뜻합니다.
-        mip_gap = max(0.0, float(mip_gap))
+        # SCIP가 제공되는 경우 실용적인 허용오차와 presolve를 사용합니다.
+        # 설정 문자열이 해당 배포 버전에서 지원되지 않더라도 계산은 계속됩니다.
         if "SCIP" in backend:
             try:
                 solver.SetSolverSpecificParametersAsString(
-                    f"limits/gap = {mip_gap:.12g}\n"
+                    "limits/gap = 0.001\n"
                     "presolving/maxrounds = 10\n"
-                    "parallel/maxnthreads = 1"
+                    "parallel/maxnthreads = 2"
                 )
             except Exception:
                 pass
@@ -405,12 +367,6 @@ class MilpBuilder:
         infinity = solver.infinity()
         variables = []
 
-        emit_progress(
-            progress_callback,
-            68,
-            "OR-Tools 변수 변환",
-            f"전체 {len(self.c):,}개 · 정수/이진 {sum(k in {'I', 'B'} for k in self.var_kind):,}개",
-        )
         for lb, ub, kind, name in zip(self.var_lb, self.var_ub, self.var_kind, self.names):
             lower = -infinity if np.isneginf(lb) else float(lb)
             upper = infinity if np.isposinf(ub) else float(ub)
@@ -422,12 +378,6 @@ class MilpBuilder:
                 var = solver.IntVar(lower, upper, name)
             variables.append(var)
 
-        emit_progress(
-            progress_callback,
-            74,
-            "OR-Tools 제약식 변환",
-            f"전체 {len(self.rows):,}개",
-        )
         for row_index, (expression, lb, ub) in enumerate(zip(self.rows, self.row_lb, self.row_ub)):
             lower = -infinity if np.isneginf(lb) else float(lb)
             upper = infinity if np.isposinf(ub) else float(ub)
@@ -441,22 +391,9 @@ class MilpBuilder:
                 objective.SetCoefficient(variables[var_index], float(coefficient))
         objective.SetMinimization()
 
-        emit_progress(
-            progress_callback,
-            82,
-            "SCIP 분기한정 탐색",
-            f"단일 스레드 · 제한시간 {int(time_limit_sec)}초 · 허용 gap {mip_gap * 100:.2f}%",
-        )
         started = time.perf_counter()
         status_code = solver.Solve()
         wall_time_sec = time.perf_counter() - started
-        emit_progress(
-            progress_callback,
-            94,
-            "Solver 종료",
-            f"경과시간 {wall_time_sec:.2f}초",
-        )
-
         status_map = {
             pywraplp.Solver.OPTIMAL: "OPTIMAL",
             pywraplp.Solver.FEASIBLE: "FEASIBLE",
@@ -474,8 +411,6 @@ class MilpBuilder:
             integer_variable_count=sum(k in {"I", "B"} for k in self.var_kind),
             binary_variable_count=sum(k == "B" for k in self.var_kind),
             constraint_count=len(self.rows),
-            configured_mip_gap=mip_gap,
-            solver_threads=1,
         )
 
         if status in {"OPTIMAL", "FEASIBLE"}:
@@ -581,7 +516,6 @@ def optimistic_carbon_lower_bounds(
     selected_plant_ids: List[str],
     scenario_id: str,
     loss_rate: float = MATERIAL_LOSS_RATE,
-    progress_callback: ProgressCallback = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """공유 용량을 무시한 낙관적 탄소 하한입니다.
 
@@ -603,9 +537,6 @@ def optimistic_carbon_lower_bounds(
     market_id = str(demand.loc[demand["product_id"].isin(selected_products), "market_id"].iloc[0])
     market = markets.loc[markets["market_id"] == market_id].iloc[0]
     rows = []
-    total_steps = max(1, len(products) * max(1, len(plants)))
-    completed_steps = 0
-    emit_progress(progress_callback, 10, "탄소 하한 준비", "제품·공급지·조립지 조합을 준비합니다.")
     for _, product in products.iterrows():
         best = np.inf
         for _, plant in plants.iterrows():
@@ -655,14 +586,6 @@ def optimistic_carbon_lower_bounds(
             final_ef = min(get_transport_parameter(tp, mode, final_region)[1] for mode in final_modes)
             total += float(product["vehicle_mass_kg"]) * final_dist * final_ef
             best = min(best, total)
-            completed_steps += 1
-            pct = 15 + int(75 * completed_steps / total_steps)
-            emit_progress(
-                progress_callback,
-                pct,
-                "낙관적 탄소 하한 계산",
-                f"{product['product_name_ko']} · {completed_steps:,}/{total_steps:,} 조합",
-            )
         cap = np.nan
         if int(scenario["apply_carbon_cap"]) == 1:
             cap = float(scenario["small_cap_kgco2_per_vehicle"] if product["vehicle_class"] == "small" else scenario["standard_cap_kgco2_per_vehicle"])
@@ -688,7 +611,6 @@ def optimistic_carbon_lower_bounds(
             "carbon_cap_kgco2_per_vehicle": cap,
             "class_average_possible": bool(np.isnan(cap) or avg_lb <= cap + 1e-6),
         })
-    emit_progress(progress_callback, 100, "feasibility 진단 완료", "낙관적 탄소 하한 계산을 마쳤습니다.")
     return product_lb, pd.DataFrame(class_rows)
 
 
@@ -702,10 +624,7 @@ def solve_model(
     cap_application: str = "class_average",
     loss_rate: float = MATERIAL_LOSS_RATE,
     time_limit_sec: int = 300,
-    mip_gap: float = 0.01,
-    progress_callback: ProgressCallback = None,
 ) -> Dict:
-    emit_progress(progress_callback, 2, "입력 검증", "업로드 CSV와 사용자 선택을 확인합니다.")
     products = tables["products.csv"].copy()
     demand = tables["demand.csv"].copy()
     suppliers = tables["raw_material_suppliers.csv"].copy()
@@ -743,7 +662,6 @@ def solve_model(
     if any(not v for v in material_suppliers.values()):
         return {"status": "INVALID_SELECTION", "message": "선택된 후보 중 일부 원자재 공급지가 없습니다."}
 
-    emit_progress(progress_callback, 8, "모형 데이터 준비", "수요·공급지·조립지 인덱스를 구성합니다.")
     model = MilpBuilder()
     F = list(product_map)
     P = list(plant_map)
@@ -764,7 +682,6 @@ def solve_model(
     raw_route_meta: Dict[Tuple[str, str, str, str, str], Dict] = {}
     final_route_meta: Dict[Tuple[str, str, str], Dict] = {}
 
-    emit_progress(progress_callback, 14, "완제품 흐름 변수 생성", f"제품 {len(F)}종 · 조립지 {len(P)}곳")
     # Assembly and finished-goods variables
     for f in F:
         D = demand_map[f]
@@ -789,7 +706,6 @@ def solve_model(
                 for t in modes:
                     model.add_constraint({ft[f, p, t]: 1.0, beta[f, p, t]: -D}, ub=0.0)
 
-    emit_progress(progress_callback, 25, "원자재 경로 변수 생성", "사용하지 않는 경로는 운송수단 이진변수를 선택하지 않도록 구성합니다.")
     # Raw-material route variables and transport-mode selection
     for f in F:
         D = demand_map[f]
@@ -810,14 +726,10 @@ def solve_model(
                         cost, ef = get_transport_parameter(tp, t, region)
                         raw_route_meta[key] = {"distance_km": dist, "cost": cost, "ef": ef, "region": region}
                     if len(modes) > 1:
-                        # 강제 선택(=1)이 아니라 선택 가능(<=1)으로 둡니다.
-                        # 따라서 경로의 총 운송량이 0이면 모든 alpha가 0일 수 있으며,
-                        # 사용하지 않는 경로 때문에 불필요한 이진 선택이 발생하지 않습니다.
                         model.add_constraint({alpha[f, r, s_id, p, t]: 1.0 for t in modes}, ub=1.0)
                         for t in modes:
                             model.add_constraint({rt[f, r, s_id, p, t]: 1.0, alpha[f, r, s_id, p, t]: -max_flow}, ub=0.0)
 
-    emit_progress(progress_callback, 42, "수급·생산방식 제약 생성", "원자재 균형과 라인/모듈 조건을 추가합니다.")
     # Raw-material requirements at each assembly location
     for f in F:
         product = product_map[f]
@@ -879,7 +791,6 @@ def solve_model(
     else:
         return {"status": "INVALID_MODE", "message": production_mode}
 
-    emit_progress(progress_callback, 52, "용량·수요 제약 생성", "공급지·조립지 용량과 프랑스 수요를 추가합니다.")
     # Supplier capacities. Battery capacity is in kWh; all other capacities are in kg.
     for r in R:
         for s_id in material_suppliers[r]:
@@ -907,7 +818,6 @@ def solve_model(
                 add_term(expr, var)
         model.add_constraint(expr, float(demand_map[f]), float(demand_map[f]))
 
-    emit_progress(progress_callback, 58, "목적함수·탄소상한 생성", "비용 최소화 목적함수와 정책 제약을 구성합니다.")
     # Objective and product carbon expressions
     product_emission_expr: Dict[str, Dict[int, float]] = {f: {} for f in F}
     coefficient_meta: Dict[Tuple[str, str, str, str, str], Dict[str, float]] = {}
@@ -983,11 +893,7 @@ def solve_model(
         else:
             return {"status": "INVALID_CAP_APPLICATION", "message": cap_application}
 
-    result = model.solve(
-        time_limit_sec=int(time_limit_sec),
-        mip_gap=float(mip_gap),
-        progress_callback=progress_callback,
-    )
+    result = model.solve(time_limit_sec=int(time_limit_sec))
     status = result.status
     if status not in {"OPTIMAL", "FEASIBLE"}:
         return {
@@ -1001,11 +907,8 @@ def solve_model(
             "integer_variable_count": result.integer_variable_count,
             "binary_variable_count": result.binary_variable_count,
             "constraint_count": result.constraint_count,
-            "configured_mip_gap": result.configured_mip_gap,
-            "solver_threads": result.solver_threads,
         }
 
-    emit_progress(progress_callback, 96, "결과 정리", "최적 경로·비용·탄소배출량 표를 생성합니다.")
     x = result.x
     tol = 1e-5
     raw_records = []
@@ -1172,23 +1075,13 @@ def solve_model(
         if not assembly_df.empty else pd.DataFrame()
     )
 
-    emit_progress(progress_callback, 100, "최적화 완료", "결과가 최적화 Output 페이지에 저장되었습니다.")
     return {
         "status": status,
         "backend": result.backend,
         "solver_message": str(result.message),
         "mip_gap": (
             abs(float(result.objective_value) - float(result.best_bound))
-            / max(
-                1e-12,
-                min(abs(float(result.objective_value)), abs(float(result.best_bound))),
-            )
-            if (
-                result.objective_value is not None
-                and result.best_bound is not None
-                and float(result.objective_value) * float(result.best_bound) >= 0
-            )
-            else np.inf
+            / max(1.0, abs(float(result.objective_value)))
             if result.objective_value is not None and result.best_bound is not None
             else np.nan
         ),
@@ -1201,8 +1094,6 @@ def solve_model(
         "integer_variable_count": result.integer_variable_count,
         "binary_variable_count": result.binary_variable_count,
         "constraint_count": result.constraint_count,
-        "configured_mip_gap": result.configured_mip_gap,
-        "solver_threads": result.solver_threads,
         "scenario_id": scenario_id,
         "scenario_name": scenario["scenario_name"],
         "raw_routes": raw_df,
@@ -1396,7 +1287,6 @@ def main():
     st.caption(
         "Word/PDF 수학모형을 Google OR-Tools MPSolver(SCIP 우선, CBC 대체)로 구현한 Streamlit SaaS"
     )
-    st.caption(f"build: {APP_BUILD}")
 
     with st.sidebar:
         st.header("CSV 입력: 방식 C")
@@ -1426,42 +1316,32 @@ def main():
     required_names = set(ALL_UPLOAD_FILES)
     missing_names = sorted(required_names - uploaded_names)
     unexpected_names = sorted(uploaded_names - required_names)
-    errors = validate_data(tables) if not missing_names else []
-    data_ready = not missing_names and not errors
 
     if unexpected_names:
         st.warning("모형에서 사용하지 않는 CSV 파일: " + ", ".join(unexpected_names))
+
     if missing_names:
         st.warning(
             f"CSV 업로드 대기 중: {len(uploaded_names & required_names)}/9개 완료. "
             "누락 파일: " + ", ".join(missing_names)
         )
-    elif errors:
-        for error in errors:
-            st.error(error)
-    else:
-        st.success("방식 C 입력 완료: 업로드한 9개 CSV만 사용합니다.")
+        st.info("왼쪽 사이드바에서 9개 CSV를 모두 선택하면 입력 검증과 최적화 화면이 활성화됩니다.")
+        st.stop()
 
-    page = st.radio(
-        "페이지",
-        [
-            "1. 입력 CSV",
-            "2. 최적화 실행",
-            "3. 최적화 Output",
-            "4. 포스터 그림",
-            "5. 수학모형 구현",
-        ],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="page_navigation",
-    )
+    errors = validate_data(tables)
+    if errors:
+        for e in errors:
+            st.error(e)
+        st.stop()
 
-    if page == "1. 입력 CSV":
+    st.success("방식 C 입력 완료: 업로드한 9개 CSV만 사용합니다.")
+
+    tab_input, tab_run, tab_output, tab_poster, tab_model = st.tabs([
+        "1. 입력 CSV", "2. 최적화 실행", "3. 최적화 Output", "4. 포스터 그림", "5. 수학모형 구현"
+    ])
+
+    with tab_input:
         st.header("입력 CSV 확인")
-        if not data_ready:
-            st.info("왼쪽 사이드바에서 9개 CSV를 모두 업로드하고 오류를 수정하면 표가 활성화됩니다.")
-            return
-
         st.warning(
             "생산·배출계수·비용·제품·수요·정책값은 Word/PPT에서 추출했습니다. "
             "Word에 수치가 없는 위경도와 공급·조립 용량은 실행 가능한 데모를 위한 구현 기본값이며 CSV에서 수정할 수 있습니다."
@@ -1475,360 +1355,216 @@ def main():
             "markets.csv": "수요지",
             "scenarios.csv": "정책 시나리오",
         }
-        selected_table = st.selectbox(
-            "확인할 CSV",
-            REQUIRED_FILES,
-            format_func=lambda name: display_names[name],
-        )
-        st.dataframe(tables[selected_table], use_container_width=True, hide_index=True)
-        st.download_button(
-            f"{selected_table} 다운로드",
-            data=tables[selected_table].to_csv(index=False).encode("utf-8-sig"),
-            file_name=selected_table,
-            mime="text/csv",
-        )
-        return
+        subtabs = st.tabs([display_names[n] for n in REQUIRED_FILES])
+        for sub, name in zip(subtabs, REQUIRED_FILES):
+            with sub:
+                st.dataframe(tables[name], use_container_width=True, hide_index=True)
+                st.download_button(
+                    f"{name} 다운로드",
+                    data=tables[name].to_csv(index=False).encode("utf-8-sig"),
+                    file_name=name,
+                    mime="text/csv",
+                    key=f"download_{name}",
+                )
 
-    if page == "2. 최적화 실행":
+    with tab_run:
         st.header("최적화 설정")
-
-        if not data_ready:
-            st.markdown("#### 실행 작업")
-            c1, c2 = st.columns(2)
-            c1.button(
-                "실행 전 feasibility 진단",
-                disabled=True,
-                use_container_width=True,
-                help="CSV 9개 업로드와 검증이 완료되면 활성화됩니다.",
-            )
-            c2.button(
-                "수학적 최적화 실행",
-                disabled=True,
-                use_container_width=True,
-                help="CSV 9개 업로드와 검증이 완료되면 활성화됩니다.",
-            )
-            st.caption("버튼이 희미한 동안에는 입력 준비가 끝나지 않은 상태입니다.")
-            return
-
         products = tables["products.csv"]
         suppliers = tables["raw_material_suppliers.csv"]
         plants = tables["assembly_locations.csv"]
         scenarios = tables["scenarios.csv"]
 
         product_options = dict(zip(products["product_name_ko"], products["product_id"]))
-        scenario_map = dict(zip(scenarios["scenario_name"], scenarios["scenario_id"]))
-
-        with st.form("optimization_form", clear_on_submit=False):
-            # 두 실행 버튼을 폼의 최상단에 먼저 선언하여 사용자가 페이지를 열자마자
-            # 수행 가능한 작업을 확인하도록 합니다. 설정 위젯은 같은 폼 안에 있으므로
-            # 버튼을 누르면 아래의 현재 선택값이 한 번에 제출됩니다.
-            st.markdown("#### 실행 작업")
-            action_col1, action_col2 = st.columns(2)
-            diagnostic_requested = action_col1.form_submit_button(
-                "실행 전 feasibility 진단",
-                use_container_width=True,
-                help="용량 검사와 낙관적 탄소 하한을 계산합니다. 최적화와는 별도 작업입니다.",
-            )
-            optimization_requested = action_col2.form_submit_button(
-                "수학적 최적화 실행",
-                type="primary",
-                use_container_width=True,
-                help="아래 설정 전체를 제출하여 OR-Tools SCIP 최적화를 실행합니다.",
-            )
-            st.caption(
-                "버튼은 즉시 표시됩니다. 계산을 시작한 뒤에는 단계 진행률에서 현재 작업을 확인할 수 있습니다."
-            )
-
-            selected_product_names = st.multiselect(
-                "완제품 선택",
-                list(product_options),
-                default=list(product_options),
-            )
-            selected_products = [product_options[name] for name in selected_product_names]
-
-            c1, c2, c3, c4, c5 = st.columns([1.0, 1.35, 1.75, 0.85, 0.85])
-            with c1:
-                production_mode = st.radio(
-                    "배터리 생산방식",
-                    options=["line", "modular"],
-                    format_func=lambda value: MODE_LABEL[value],
-                )
-            with c2:
-                scenario_name = st.selectbox("정책 시나리오", list(scenario_map))
-                scenario_id = scenario_map[scenario_name]
-            with c3:
-                cap_application = st.selectbox(
-                    "탄소상한 적용 단위",
-                    options=["class_average", "product_strict"],
-                    format_func=lambda value: CAP_APPLICATION_LABEL[value],
-                    help=(
-                        "포스터 재현 모드는 소형 및 중형·대형 차급별 수요가중 평균에 상한을 적용합니다. "
-                        "PDF 엄격 모드는 각 트림의 차량 1대당 탄소발자국에 상한을 개별 적용합니다."
-                    ),
-                )
-            with c4:
-                time_limit = st.number_input(
-                    "제한시간(초)", min_value=30, max_value=1800, value=300, step=30
-                )
-            with c5:
-                mip_gap_pct = st.number_input(
-                    "허용 MIP gap(%)",
-                    min_value=0.0,
-                    max_value=20.0,
-                    value=1.0,
-                    step=0.1,
-                    help="incumbent와 best bound의 상대 optimality gap입니다.",
-                )
-
-            st.subheader("후보 공급지·조립지")
-            st.caption(
-                "모든 후보가 기본 선택됩니다. 운송량이 0인 경로는 운송수단 이진변수를 강제로 선택하지 않도록 구성했습니다."
-            )
-            supplier_ids: List[str] = []
-            cols = st.columns(4)
-            for col, material in zip(cols, ["steel", "aluminum", "other", "battery"]):
-                with col:
-                    sub = suppliers[suppliers["material_id"] == material]
-                    options = dict(zip(sub["location_name"], sub["supplier_id"]))
-                    chosen = st.multiselect(
-                        MATERIAL_LABEL[material],
-                        list(options),
-                        default=list(options),
-                        key=f"supplier_{material}",
-                    )
-                    supplier_ids.extend(options[name] for name in chosen)
-
-            plant_options = dict(zip(plants["location_name"], plants["plant_id"]))
-            chosen_plants = st.multiselect(
-                "가공·조립 위치",
-                list(plant_options),
-                default=list(plant_options),
-            )
-            plant_ids = [plant_options[name] for name in chosen_plants]
-
-        selection_ready = bool(
-            selected_products
-            and plant_ids
-            and all(
-                any(
-                    supplier_id in supplier_ids
-                    for supplier_id in suppliers.loc[
-                        suppliers["material_id"] == material, "supplier_id"
-                    ]
-                )
-                for material in ["steel", "aluminum", "other", "battery"]
-            )
+        selected_product_names = st.multiselect(
+            "완제품 선택",
+            list(product_options),
+            default=list(product_options),
         )
+        selected_products = [product_options[x] for x in selected_product_names]
 
-        if not selection_ready and (diagnostic_requested or optimization_requested):
-            st.error("제품, 네 재질의 공급지, 가공·조립 위치를 각각 하나 이상 선택하세요.")
-            return
-
-        if diagnostic_requested:
-            st.subheader("실행 전 feasibility 진단 진행률")
-            diag_progress = st.progress(0, text="진단 준비 중")
-            diag_stage = st.empty()
-
-            def diagnostic_progress(percent: int, stage: str, detail: str = "") -> None:
-                label = stage if not detail else f"{stage} — {detail}"
-                diag_progress.progress(percent, text=label)
-                diag_stage.caption(label)
-
-            emit_progress(diagnostic_progress, 2, "빠른 용량 검사", "공급·조립 총용량을 합산합니다.")
-            capacity_diag = selection_capacity_diagnostics(
-                tables, selected_products, supplier_ids, plant_ids
+        c1, c2, c3, c4 = st.columns([1.0, 1.3, 1.8, 0.9])
+        with c1:
+            production_mode = st.radio(
+                "배터리 생산방식",
+                options=["line", "modular"],
+                format_func=lambda x: MODE_LABEL[x],
             )
-            emit_progress(diagnostic_progress, 8, "탄소 하한 계산 시작", "최적화와 독립된 낙관적 진단입니다.")
-            product_lb, class_lb = optimistic_carbon_lower_bounds(
-                tables,
-                selected_products,
-                supplier_ids,
-                plant_ids,
-                scenario_id,
-                MATERIAL_LOSS_RATE,
-                progress_callback=diagnostic_progress,
+        with c2:
+            scenario_map = dict(zip(scenarios["scenario_name"], scenarios["scenario_id"]))
+            scenario_name = st.selectbox("정책 시나리오", list(scenario_map))
+            scenario_id = scenario_map[scenario_name]
+        with c3:
+            cap_application = st.selectbox(
+                "탄소상한 적용 단위",
+                options=["class_average", "product_strict"],
+                format_func=lambda x: CAP_APPLICATION_LABEL[x],
+                help=(
+                    "포스터 재현 모드는 소형 및 중형·대형 차급별 수요가중 평균에 상한을 적용합니다. "
+                    "PDF 엄격 모드는 각 트림의 차량 1대당 탄소발자국에 상한을 개별 적용합니다."
+                ),
             )
-            st.session_state["feasibility_result"] = {
-                "capacity": capacity_diag,
-                "product_lb": product_lb,
-                "class_lb": class_lb,
-                "scenario_id": scenario_id,
-            }
-            diag_progress.progress(100, text="feasibility 진단 완료")
-            diag_stage.success("진단 결과가 아래에 표시되었습니다.")
+        with c4:
+            time_limit = st.number_input("Solver 제한시간(초)", min_value=30, max_value=1800, value=300, step=30)
 
-        feasibility_result = st.session_state.get("feasibility_result")
-        if feasibility_result:
-            with st.expander("최근 feasibility 진단 결과", expanded=True):
-                st.markdown("**공급·조립 용량 필요량과 선택후보 용량**")
-                st.dataframe(
-                    feasibility_result["capacity"], use_container_width=True, hide_index=True
+        if cap_application == "class_average":
+            st.info(
+                "포스터의 시나리오 ③ 결과 재현을 위해 같은 차급의 총배출량/총수요로 계산한 "
+                "수요가중 평균 상한을 사용합니다. 개별 트림 기준을 확인하려면 'PDF 엄격 적용'을 선택하세요."
+            )
+        else:
+            st.warning(
+                "PDF 엄격 적용에서는 선택 후보의 최저 탄소조합으로도 일부 롱레인지 트림이 "
+                "65점 상한을 넘으면 실제 INFEASIBLE이 될 수 있습니다."
+            )
+
+        st.subheader("후보 공급지·조립지")
+        st.caption("기본값은 Word/PDF에 수록된 모든 공급지와 가공·조립 후보입니다. 일부 후보만 선택하면 용량 또는 탄소상한 때문에 실제 infeasible이 될 수 있습니다.")
+        supplier_ids = []
+        cols = st.columns(4)
+        for col, material in zip(cols, ["steel", "aluminum", "other", "battery"]):
+            with col:
+                sub = suppliers[suppliers["material_id"] == material]
+                options = dict(zip(sub["location_name"], sub["supplier_id"]))
+                default_names = list(options)
+                chosen = st.multiselect(MATERIAL_LABEL[material], list(options), default=default_names, key=f"supplier_{material}")
+                supplier_ids.extend(options[x] for x in chosen)
+
+        plant_options = dict(zip(plants["location_name"], plants["plant_id"]))
+        default_plants = list(plant_options)
+        chosen_plants = st.multiselect("가공·조립 위치", list(plant_options), default=default_plants)
+        plant_ids = [plant_options[x] for x in chosen_plants]
+
+        capacity_diag = selection_capacity_diagnostics(
+            tables, selected_products, supplier_ids, plant_ids
+        ) if selected_products and supplier_ids and plant_ids else pd.DataFrame()
+        product_lb, class_lb = (
+            optimistic_carbon_lower_bounds(
+                tables, selected_products, supplier_ids, plant_ids, scenario_id, MATERIAL_LOSS_RATE
+            )
+            if selected_products and supplier_ids and plant_ids
+            else (pd.DataFrame(), pd.DataFrame())
+        )
+        with st.expander("실행 전 feasibility 진단", expanded=False):
+            st.markdown("**공급·조립 용량 필요량과 선택후보 용량**")
+            st.dataframe(capacity_diag, use_container_width=True, hide_index=True)
+            if int(scenarios.loc[scenarios["scenario_id"] == scenario_id, "apply_carbon_cap"].iloc[0]) == 1:
+                st.markdown("**공유용량을 무시한 제품별 낙관적 탄소 하한**")
+                st.dataframe(product_lb, use_container_width=True, hide_index=True)
+                st.markdown("**차급별 수요가중 낙관적 탄소 하한**")
+                st.dataframe(class_lb, use_container_width=True, hide_index=True)
+                st.caption("이 하한이 상한보다 크면 확실히 infeasible입니다. 하한이 상한보다 작아도 공유용량·정수조건 때문에 feasible을 보장하지는 않습니다.")
+
+        run = st.button("수학적 최적화 실행", type="primary", use_container_width=True)
+        if run:
+            with st.spinner("OR-Tools 혼합정수 공급망 최적화 모형을 계산하고 있습니다..."):
+                result = solve_model(
+                    tables=tables,
+                    selected_products=selected_products,
+                    selected_supplier_ids=supplier_ids,
+                    selected_plant_ids=plant_ids,
+                    production_mode=production_mode,
+                    scenario_id=scenario_id,
+                    cap_application=cap_application,
+                    loss_rate=MATERIAL_LOSS_RATE,
+                    time_limit_sec=int(time_limit),
                 )
-                if not feasibility_result["product_lb"].empty:
-                    st.markdown("**공유용량을 무시한 제품별 낙관적 탄소 하한**")
-                    st.dataframe(
-                        feasibility_result["product_lb"],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                    st.markdown("**차급별 수요가중 낙관적 탄소 하한**")
-                    st.dataframe(
-                        feasibility_result["class_lb"],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                    st.caption(
-                        "하한이 상한보다 크면 확실히 infeasible입니다. 하한이 상한보다 작아도 공유용량·정수조건 때문에 feasible을 보장하지는 않습니다."
-                    )
-
-        if optimization_requested:
-            st.subheader("최적화 작업 단계 진행률")
-            optimization_progress = st.progress(0, text="최적화 준비 중")
-            optimization_stage = st.empty()
-
-            def ui_progress(percent: int, stage: str, detail: str = "") -> None:
-                label = stage if not detail else f"{stage} — {detail}"
-                optimization_progress.progress(percent, text=label)
-                if percent < 100:
-                    optimization_stage.info(label)
-                else:
-                    optimization_stage.success(label)
-
-            result = solve_model(
-                tables=tables,
-                selected_products=selected_products,
-                selected_supplier_ids=supplier_ids,
-                selected_plant_ids=plant_ids,
-                production_mode=production_mode,
-                scenario_id=scenario_id,
-                cap_application=cap_application,
-                loss_rate=MATERIAL_LOSS_RATE,
-                time_limit_sec=int(time_limit),
-                mip_gap=float(mip_gap_pct) / 100.0,
-                progress_callback=ui_progress,
-            )
             st.session_state["optimization_result"] = result
-
             if result["status"] in {"OPTIMAL", "FEASIBLE"}:
-                optimization_progress.progress(100, text="최적화 완료")
                 st.success(f"{result['status']} 해를 찾았습니다. Solver: {result['backend']}")
-                st.info("'3. 최적화 Output' 페이지에서 지도·표·그림과 결과 CSV를 확인하세요.")
+                st.info("'3. 최적화 Output' 탭에서 지도·표·그림과 결과 CSV를 확인하세요.")
             else:
-                optimization_progress.progress(100, text=f"Solver 종료: {result.get('status')}")
                 st.error(f"Solver 상태: {result.get('status')} — {result.get('message', '')}")
                 st.code(
-                    "\n".join(
-                        [
-                            f"Backend: {result.get('backend', '')}",
-                            f"Wall time: {result.get('wall_time_sec', 0):.2f} sec",
-                            f"Variables: {result.get('variable_count', 0):,}",
-                            f"Integer variables: {result.get('integer_variable_count', 0):,}",
-                            f"Binary variables: {result.get('binary_variable_count', 0):,}",
-                            f"Constraints: {result.get('constraint_count', 0):,}",
-                            f"SCIP threads: {result.get('solver_threads', 1)}",
-                            f"Configured MIP gap: {result.get('configured_mip_gap', float(mip_gap_pct) / 100):.4f}",
-                        ]
-                    ),
+                    "\n".join([
+                        f"Backend: {result.get('backend', '')}",
+                        f"Wall time: {result.get('wall_time_sec', 0):.2f} sec",
+                        f"Variables: {result.get('variable_count', 0):,}",
+                        f"Integer variables: {result.get('integer_variable_count', 0):,}",
+                        f"Binary variables: {result.get('binary_variable_count', 0):,}",
+                        f"Constraints: {result.get('constraint_count', 0):,}",
+                        f"Cap application: {CAP_APPLICATION_LABEL.get(result.get('cap_application'), result.get('cap_application'))}",
+                    ]),
                     language=None,
                 )
                 if result.get("status") == "NOT_SOLVED":
-                    st.warning(
-                        "이는 infeasible 판정이 아닙니다. 제한시간을 늘리거나 후보지를 줄인 뒤 다시 실행하세요."
-                    )
+                    st.warning("이는 infeasible 판정이 아닙니다. 제한시간을 늘리거나 후보지를 줄인 뒤 다시 실행하세요.")
                 elif result.get("status") == "INFEASIBLE":
-                    st.warning(
-                        "선택 후보의 용량과 탄소 하한을 확인하세요. 후보를 추가해도 탄소 하한이 상한보다 높으면 실제 infeasible입니다."
-                    )
-        return
+                    st.warning("선택 후보의 용량과 탄소 하한을 확인하세요. 후보를 추가해도 탄소 하한이 상한보다 높으면 실제 infeasible입니다.")
 
-    if page == "3. 최적화 Output":
+    with tab_output:
         st.header("최적화 Output")
         result = st.session_state.get("optimization_result")
         if not result or result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
-            st.info("먼저 '2. 최적화 실행' 페이지에서 최적화를 실행하세요.")
-            return
+            st.info("먼저 '2. 최적화 실행' 탭에서 최적화를 실행하세요.")
+        else:
+            st.caption(
+                f"{MODE_LABEL[result['production_mode']]} | {result['scenario_name']} | "
+                f"{CAP_APPLICATION_LABEL.get(result['cap_application'], result['cap_application'])} | Solver {result['backend']}"
+            )
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("총 공급망 비용", f"€ {result['total_cost_eur']:,.0f}")
+            c2.metric("총 탄소배출량", f"{result['total_emissions_kgco2']/1_000_000:,.2f} kt CO₂-eq")
+            c3.metric("제품 평균 비용", f"€ {result['product_summary']['cost_per_vehicle_eur'].mean():,.0f}/대")
+            c4.metric("평균 보조금 점수", f"{result['product_summary']['subsidy_score'].mean():.1f}/80")
 
-        st.caption(
-            f"{MODE_LABEL[result['production_mode']]} | {result['scenario_name']} | "
-            f"{CAP_APPLICATION_LABEL.get(result['cap_application'], result['cap_application'])} | "
-            f"Solver {result['backend']} · 단일 스레드"
-        )
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("총 공급망 비용", f"€ {result['total_cost_eur']:,.0f}")
-        c2.metric("총 탄소배출량", f"{result['total_emissions_kgco2']/1_000_000:,.2f} kt CO₂-eq")
-        c3.metric("제품 평균 비용", f"€ {result['product_summary']['cost_per_vehicle_eur'].mean():,.0f}/대")
-        c4.metric("평균 보조금 점수", f"{result['product_summary']['subsidy_score'].mean():.1f}/80")
-
-        with st.expander("Solver 계산 정보", expanded=False):
-            st.write(
-                {
+            with st.expander("Solver 계산 정보", expanded=False):
+                st.write({
                     "상태": result["status"],
                     "계산시간(초)": round(result.get("wall_time_sec", 0.0), 3),
                     "전체 변수": result.get("variable_count"),
                     "정수 변수": result.get("integer_variable_count"),
                     "이진 변수": result.get("binary_variable_count"),
                     "제약조건": result.get("constraint_count"),
-                    "SCIP 스레드": result.get("solver_threads", 1),
-                    "설정 MIP gap": result.get("configured_mip_gap"),
-                    "최종 MIP gap": result.get("mip_gap"),
-                }
-            )
+                    "MIP gap": result.get("mip_gap"),
+                })
 
-        if result.get("cap_application") == "class_average":
-            st.subheader("차급별 수요가중 평균 탄소상한 결과")
-            st.dataframe(result["class_summary"], use_container_width=True, hide_index=True)
+            if result.get("cap_application") == "class_average":
+                st.subheader("차급별 수요가중 평균 탄소상한 결과")
+                st.dataframe(result["class_summary"], use_container_width=True, hide_index=True)
 
-        st.subheader("제품별 정책 충족 결과")
-        display = result["product_summary"].copy()
-        display["eligible"] = display["eligible"].map({True: "충족", False: "미충족"})
-        st.dataframe(display, use_container_width=True, hide_index=True)
-        fig = product_carbon_figure(result["product_summary"])
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+            st.subheader("제품별 정책 충족 결과")
+            display = result["product_summary"].copy()
+            display["eligible"] = display["eligible"].map({True: "충족", False: "미충족"})
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.pyplot(product_carbon_figure(result["product_summary"]), use_container_width=True)
 
-        st.subheader("비용·탄소 구성 그림")
-        col1, col2 = st.columns(2)
-        with col1:
-            fig = pie_figure(result["cost_breakdown"], "총비용 구성")
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
-        with col2:
-            fig = pie_figure(result["emission_breakdown"], "총 탄소배출량 구성")
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+            st.subheader("비용·탄소 구성 그림")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.pyplot(pie_figure(result["cost_breakdown"], "총비용 구성"), use_container_width=True)
+            with col2:
+                st.pyplot(pie_figure(result["emission_breakdown"], "총 탄소배출량 구성"), use_container_width=True)
 
-        if st.checkbox("최적 공급망 지도 생성", value=False):
             st.subheader("최적 공급망 지도")
             render_supply_chain_map(result)
 
-        st.subheader("공급지·조립지 배분")
-        col3, col4 = st.columns(2)
-        with col3:
-            st.markdown("**원자재 공급지별 물량**")
-            st.dataframe(result["supplier_summary"], use_container_width=True, hide_index=True)
-        with col4:
-            st.markdown("**조립지별 생산량**")
-            st.dataframe(result["plant_summary"], use_container_width=True, hide_index=True)
+            st.subheader("공급지·조립지 배분")
+            col3, col4 = st.columns(2)
+            with col3:
+                st.markdown("**원자재 공급지별 물량**")
+                st.dataframe(result["supplier_summary"], use_container_width=True, hide_index=True)
+            with col4:
+                st.markdown("**조립지별 생산량**")
+                st.dataframe(result["plant_summary"], use_container_width=True, hide_index=True)
 
-        with st.expander("상세 경로 결과"):
-            st.markdown("**원자재·배터리 공급 경로**")
-            st.dataframe(result["raw_routes"], use_container_width=True, hide_index=True)
-            st.markdown("**완제품 운송 경로**")
-            st.dataframe(result["final_routes"], use_container_width=True, hide_index=True)
+            with st.expander("상세 경로 결과"):
+                st.markdown("**원자재·배터리 공급 경로**")
+                st.dataframe(result["raw_routes"], use_container_width=True, hide_index=True)
+                st.markdown("**완제품 운송 경로**")
+                st.dataframe(result["final_routes"], use_container_width=True, hide_index=True)
 
-        st.download_button(
-            "전체 최적화 결과 CSV ZIP 다운로드",
-            data=result_zip(result),
-            file_name=f"optimization_result_{result['scenario_id']}_{result['production_mode']}.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
-        return
+            st.download_button(
+                "전체 최적화 결과 CSV ZIP 다운로드",
+                data=result_zip(result),
+                file_name=f"optimization_result_{result['scenario_id']}_{result['production_mode']}.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
 
-    if page == "4. 포스터 그림":
+    with tab_poster:
         st.header("세 번째 파일의 최종 결과 그림")
         st.info(
-            "이 페이지는 2025 춘계산업공학회 포스터에 기재된 그림과 수치를 그대로 보여주는 벤치마크 영역입니다. "
+            "이 탭은 2025 춘계산업공학회 포스터에 기재된 그림과 수치를 그대로 보여주는 벤치마크 영역입니다. "
             "현재 업로드 CSV로 다시 계산한 최적화 결과와 구분해 해석하세요."
         )
         poster_path = ASSET_DIR / "poster_reference.png"
@@ -1840,28 +1576,19 @@ def main():
         if all(name in tables for name in BENCHMARK_FILES):
             ratios = tables["poster_benchmark_cost_ratios.csv"]
             quartiles = tables["poster_benchmark_quartiles.csv"]
-            chart_choice = st.selectbox(
-                "재구성할 포스터 그림",
-                ["시나리오별 비용 비율", "운송량 사분위수", "라인 대비 모듈 차이"],
-            )
-            if chart_choice == "시나리오별 비용 비율":
-                fig = benchmark_cost_ratio_figure(ratios)
-            elif chart_choice == "운송량 사분위수":
-                fig = benchmark_quartile_figure(quartiles)
-            else:
-                fig = benchmark_difference_figure(quartiles)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+            st.subheader("포스터 결과 재구성 그림")
+            st.pyplot(benchmark_cost_ratio_figure(ratios), use_container_width=True)
+            st.pyplot(benchmark_quartile_figure(quartiles), use_container_width=True)
+            st.pyplot(benchmark_difference_figure(quartiles), use_container_width=True)
             c1, c2 = st.columns(2)
             with c1:
                 st.dataframe(ratios, use_container_width=True, hide_index=True)
             with c2:
                 st.dataframe(quartiles, use_container_width=True, hide_index=True)
         else:
-            st.warning("포스터 벤치마크 CSV가 없습니다. CSV 업로드 전에도 원본 이미지는 확인할 수 있습니다.")
-        return
+            st.warning("포스터 벤치마크 CSV가 없습니다.")
 
-    if page == "5. 수학모형 구현":
+    with tab_model:
         st.header("Word 수학적 최적화 모형의 코드 대응")
         st.markdown(
             """
@@ -1876,18 +1603,12 @@ def main():
 4. 라인 생산: 완성 배터리 팩 공급 횟수와 조립대수의 일치
 5. 모듈러 생산: 10 kWh 메인 모듈과 5 kWh 보조 모듈 개수의 일치
 6. 프랑스 제품 수요 충족
-7. 위치 간 운송수단 최대 하나 선택: `Σ_t α ≤ 1`
-8. 미사용 경로: 운송량이 0이면 모든 운송수단 이진변수가 0일 수 있음
+7. 위치 간 운송수단 하나 선택(Big-M 등가식)
+8. 소형 8,750 kg CO₂-eq/대, 중·대형 14,250 kg CO₂-eq/대 등 시나리오별 탄소상한
 9. 포스터 재현 모드: 차급별 수요가중 평균 상한 / PDF 엄격 모드: 트림별 개별 상한
 
-**Branch-and-bound와 LP relaxation**  
-코드에서 별도의 반복문으로 직접 작성하지는 않지만, OR-Tools MPSolver가 SCIP/CBC에 정수·이진변수가 포함된 MIP를 전달하면 Solver 내부에서 LP relaxation, branch-and-bound 및 절단평면을 수행합니다.
-
-**CPU 제한 설정**  
-SCIP 및 MPSolver를 단일 스레드로 제한하여 Streamlit Community Cloud의 순간 CPU 사용량을 낮춥니다.
-
-**MIP gap**  
-현재 최선의 실행 가능 해(incumbent)와 best bound 사이의 상대 optimality gap입니다. 기본 1%는 두 값의 차이가 목적함수 기준 1% 이내이면 종료할 수 있음을 뜻합니다.
+**Solver 구현**  
+Google OR-Tools의 `pywraplp.MPSolver`를 사용합니다. 연속·정수·이진변수가 함께 있으므로 `GLOP`이 아니라 `SCIP`을 먼저 생성하며, 환경에서 SCIP를 제공하지 않으면 `CBC`로 대체합니다.
 
 **단위 정합화**  
 Word 모형의 배터리 운송변수는 kg, 생산비·배출계수는 kWh 기준이므로, 제품별 `battery_kWh / battery_mass_kg`를 이용해 코드에서 kg↔kWh를 변환합니다. 철강·알루미늄 생산 탄소배출량에는 첫 번째 PDF의 손실률 0.3을 반영하여 배출계수를 `1/(1-0.3)`배 적용합니다. 비용과 배출량이 모두 열등한 운송수단은 최적해를 바꾸지 않는 범위에서 사전 제거합니다.
