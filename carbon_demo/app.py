@@ -1,3 +1,4 @@
+# DEPLOYMENT_MARKER: ORTOOLS_V7_2_NO_SCIPY_IMPORT
 from __future__ import annotations
 
 import hashlib
@@ -31,8 +32,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-v7.1"
-APP_PACKAGE_ID = "20260803-2208-KST"
+APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-v7.2"
+APP_PACKAGE_ID = "20260803-2220-KST"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -344,7 +345,7 @@ class IndexLayout:
 class LinearConstraintBuilder:
     """Compact row-wise storage used to build an OR-Tools MPSolver model.
 
-    Coefficients are stored only until solve time. This avoids a SciPy dependency and
+    Coefficients are stored only until solve time. This avoids an additional sparse-matrix dependency and
     keeps the Xpress-equivalent LP structure unchanged.
     """
 
