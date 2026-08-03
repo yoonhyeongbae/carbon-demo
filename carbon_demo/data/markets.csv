@@ -1,2 +1,2 @@
-﻿market_id,market_name,location_name,continent,latitude,longitude,source_basis
-FR,프랑스 시장,프랑스,Europe,46.2276,2.2137,Word market is France; coordinate is implementation default for geodesic distance
+market_id,market_name,location_name,continent,latitude,longitude,minimum_distance_km,source_basis
+FR,프랑스 시장,프랑스,Europe,46.2276,2.2137,50.0,Xpress location index 1 and minimum route distance inferred from objective coefficients
