@@ -1,32 +1,25 @@
-﻿plant_id,location_name,continent,latitude,longitude,assembly_ef_kgco2_per_kg,assembly_cost_eur_per_kg,capacity_kg,active_default,source_basis
-plant_01,오스트리아,Europe,47.5162,14.5501,0.7,1.9,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_02,벨기에,Europe,50.5039,4.4699,0.73,2.1,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_03,브라질,Americas,-14.235,-51.9253,0.76,1.7,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_04,중국,Asia,35.8617,104.1954,1.6,1.1,21105000,1,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_05,한국,Asia,35.9078,127.7669,1.43,1.2,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_06,체코,Europe,49.8175,15.473,0.94,2.6,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_07,핀란드,Europe,61.9241,25.7482,0.57,2.0,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_08,프랑스,Europe,46.2276,2.2137,0.58,3.0,21105000,1,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_09,독일,Europe,51.1657,10.4515,0.83,3.5,21105000,1,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_10,헝가리,Europe,47.1625,19.5033,0.74,2.4,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_11,인도,Asia,20.5937,78.9629,1.82,1.4,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_12,인도네시아,Asia,-0.7893,113.9213,1.84,1.3,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_13,이탈리아,Europe,41.8719,12.5674,0.78,2.9,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_14,일본,Asia,36.2048,138.2529,1.46,3.3,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_15,멕시코,Americas,23.6345,-102.5528,1.18,1.8,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_16,모로코,Africa,31.7917,-7.0926,1.87,1.6,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_17,폴란드,Europe,51.9194,19.1451,1.16,2.7,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_18,포르투갈,Europe,39.3999,-8.2245,0.72,2.2,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_19,튀르키예,Europe,38.9637,35.2433,1.0,1.5,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_20,슬로바키아,Europe,48.669,19.699,0.75,2.5,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_21,슬로바니아,Europe,46.1512,14.9955,0.72,2.3,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_22,스페인,Europe,40.4637,-3.7492,0.7,2.8,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_23,영국,Europe,55.3781,-3.436,0.75,3.1,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_24,미국,Americas,37.0902,-95.7129,1.05,3.2,21105000,1,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_25,베트남,Asia,14.0583,108.2772,1.67,1.2,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_26,기타 아프리카 국가,Africa,1.6508,17.6791,1.66,0.9,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_27,기타 아시아 국가,Asia,34.0479,100.6197,1.56,1.0,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_28,기타 북미 국가,Americas,54.526,-105.2551,1.03,0.8,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_29,기타 아메리카 국가,Americas,8.7832,-55.4915,0.97,0.7,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_30,기타 유럽 국가,Europe,54.526,15.2551,0.76,0.6,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
-plant_31,오세아니아 국가,Oceania,-25.2744,133.7751,1.67,0.5,21105000,0,Word assembly factor/cost table; coordinates and capacity are implementation defaults because Word does not provide them
+xpress_location_index,plant_id,location_name,continent,latitude,longitude,assembly_ef_kgco2_per_kg,assembly_cost_eur_per_kg,capacity_kg,enforce_capacity,active_default,source_basis
+1,plant_01,프랑스,Europe,46.2276,2.2137,0.58,3.0,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+2,plant_02,독일,Europe,51.1657,10.4515,0.83,3.5,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+3,plant_03,벨기에,Europe,50.5039,4.4699,0.73,2.1,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+4,plant_04,스페인,Europe,40.4637,-3.7492,0.7,2.8,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+5,plant_05,슬로바키아,Europe,48.669,19.699,0.75,2.5,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+6,plant_06,슬로바니아,Europe,46.1512,14.9955,0.72,2.3,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+7,plant_07,오스트리아,Europe,47.5162,14.5501,0.7,1.9,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+8,plant_08,이탈리아,Europe,41.8719,12.5674,0.78,2.9,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+9,plant_09,체코,Europe,49.8175,15.473,0.94,2.6,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+10,plant_10,포르투갈,Europe,39.3999,-8.2245,0.72,2.2,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+11,plant_11,폴란드,Europe,51.9194,19.1451,1.16,2.7,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+12,plant_12,핀란드,Europe,61.9241,25.7482,0.57,2.0,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+13,plant_13,헝가리,Europe,47.1625,19.5033,0.74,2.4,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+14,plant_14,영국,Europe,55.3781,-3.436,0.75,3.1,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+15,plant_15,튀르키예,Europe,38.9637,35.2433,1.0,1.5,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+16,plant_16,한국,Asia,35.9078,127.7669,1.43,1.2,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+17,plant_17,중국,Asia,35.8617,104.1954,1.6,1.1,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+18,plant_18,일본,Asia,36.2048,138.2529,1.46,3.3,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+19,plant_19,베트남,Asia,14.0583,108.2772,1.67,1.2,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+20,plant_20,인도,Asia,20.5937,78.9629,1.82,1.4,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+21,plant_21,인도네시아,Asia,-0.7893,113.9213,1.84,1.3,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+22,plant_22,미국,Americas,37.0902,-95.7129,1.05,3.2,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+23,plant_23,브라질,Americas,-14.235,-51.9253,0.76,1.7,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
+24,plant_24,멕시코,Americas,23.6345,-102.5528,1.18,1.8,1000000000000.0,0,1,Xpress FP objective coefficient; coordinates/assembly EF from Word location table
