@@ -23,8 +23,8 @@ from streamlit_folium import st_folium
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
-APP_BUILD = "strategic-lp-product-route-maps-v6.2"
-APP_PACKAGE_ID = "20260803-2023-KST"
+APP_BUILD = "strategic-lp-score-sensitivity-stage3-summary-v6.3"
+APP_PACKAGE_ID = "20260803-2033-KST"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -433,6 +433,20 @@ def add_term(expr: Dict[int, float], var: int, coefficient: float = 1.0):
     expr[var] = expr.get(var, 0.0) + float(coefficient)
 
 
+def carbon_cap_from_score(vehicle_class: str, score: float) -> float:
+    """Convert the French subsidy score threshold to a per-vehicle carbon cap.
+
+    The score is clipped to [0, 80]. Small vehicles use the 6,000--17,000
+    kg CO2-eq range; medium/large vehicles use the 12,000--21,000 range.
+    """
+    clipped = min(80.0, max(0.0, float(score)))
+    if vehicle_class == "small":
+        low, high = 6000.0, 17000.0
+    else:
+        low, high = 12000.0, 21000.0
+    return high - (clipped / 80.0) * (high - low)
+
+
 def subsidy_score(vehicle_class: str, emission_per_vehicle: float) -> float:
     if vehicle_class == "small":
         low, high = 6000.0, 17000.0
@@ -608,6 +622,7 @@ def solve_model(
     cap_application: str = "product_strict",
     loss_rate: float = MATERIAL_LOSS_RATE,
     time_limit_sec: int = 300,
+    score_override: float | None = None,
 ) -> Dict:
     products = tables["products.csv"].copy()
     demand = tables["demand.csv"].copy()
@@ -633,7 +648,14 @@ def solve_model(
     scenario_row = scenarios[scenarios["scenario_id"] == scenario_id]
     if scenario_row.empty:
         return {"status": "INVALID_SCENARIO", "message": f"scenarios.csv에 {scenario_id}가 없습니다."}
-    scenario = scenario_row.iloc[0]
+    scenario = scenario_row.iloc[0].copy()
+    if score_override is not None:
+        sensitivity_score = min(80.0, max(0.0, float(score_override)))
+        scenario["minimum_score"] = sensitivity_score
+        scenario["apply_carbon_cap"] = 1
+        scenario["small_cap_kgco2_per_vehicle"] = carbon_cap_from_score("small", sensitivity_score)
+        scenario["standard_cap_kgco2_per_vehicle"] = carbon_cap_from_score("standard", sensitivity_score)
+        scenario["scenario_name"] = f"보조금 점수 {sensitivity_score:g}점 민감도"
 
     product_map = products.set_index("product_id").to_dict("index")
     demand_map = demand.groupby("product_id")["demand_units"].sum().astype(int).to_dict()
@@ -775,12 +797,12 @@ def solve_model(
                         add_term(expr, rt[f, r, s_id, p, t], kwh_per_kg if r == "battery" else 1.0)
             model.add_constraint(expr, ub=float(supplier_map[s_id]["capacity"]))
 
-    # Assembly capacity in kg of battery-excluded vehicle mass
+    # Assembly capacities in kg of battery-excluded vehicle mass
     for p in P:
         expr = {fp[f, p]: float(product_map[f]["nonbattery_mass_kg"]) for f in F}
         model.add_constraint(expr, ub=float(plant_map[p]["capacity_kg"]))
 
-    # Market demand
+    # Market demand fulfillment
     for f in F:
         expr: Dict[int, float] = {}
         for (ff, p, t), var in ft.items():
@@ -789,6 +811,7 @@ def solve_model(
         model.add_constraint(expr, float(demand_map[f]), float(demand_map[f]))
 
     # Objective and product carbon expressions
+    # Objective coefficients and per-product carbon expressions
     product_emission_expr: Dict[str, Dict[int, float]] = {f: {} for f in F}
     coefficient_meta: Dict[Tuple[str, str, str, str, str], Dict[str, float]] = {}
     for key, var in rt.items():
@@ -833,6 +856,7 @@ def solve_model(
         add_term(product_emission_expr[f], var, ef_coef)
         final_coefficient_meta[key] = {"cost_coef": cost_coef, "ef_coef": ef_coef}
 
+    # Carbon-cap constraints
     if int(scenario["apply_carbon_cap"]) == 1:
         if cap_application == "product_strict":
             # PDF의 차량별 점수식을 각 트림에 개별 적용합니다.
@@ -1044,6 +1068,42 @@ def solve_model(
         .agg(assembled_units=("assembled_units", "sum"), assembly_mass_kg=("assembly_mass_kg", "sum"), assembly_cost_eur=("assembly_cost_eur", "sum"), assembly_emissions_kgco2=("assembly_emissions_kgco2", "sum"))
         if not assembly_df.empty else pd.DataFrame()
     )
+    supply_route_summary = (
+        raw_df.groupby(
+            [
+                "product_id", "product_name", "material_id", "material_name",
+                "supplier_id", "supplier_location", "plant_id", "plant_location",
+                "transport_mode", "transport_mode_ko",
+            ],
+            as_index=False,
+        )
+        .agg(
+            flow_kg=("flow_kg", "sum"),
+            distance_km=("distance_km", "first"),
+            production_cost_eur=("production_cost_eur", "sum"),
+            transport_cost_eur=("transport_cost_eur", "sum"),
+            production_emissions_kgco2=("production_emissions_kgco2", "sum"),
+            transport_emissions_kgco2=("transport_emissions_kgco2", "sum"),
+        )
+        if not raw_df.empty else pd.DataFrame()
+    )
+    finished_route_summary = (
+        final_df.groupby(
+            [
+                "product_id", "product_name", "plant_id", "plant_location",
+                "market_id", "market_name", "transport_mode", "transport_mode_ko",
+            ],
+            as_index=False,
+        )
+        .agg(
+            vehicle_units=("vehicle_units", "sum"),
+            transport_mass_kg=("transport_mass_kg", "sum"),
+            distance_km=("distance_km", "first"),
+            transport_cost_eur=("transport_cost_eur", "sum"),
+            transport_emissions_kgco2=("transport_emissions_kgco2", "sum"),
+        )
+        if not final_df.empty else pd.DataFrame()
+    )
 
     return {
         "status": status,
@@ -1068,14 +1128,22 @@ def solve_model(
         "binary_variable_count": result.binary_variable_count,
         "constraint_count": result.constraint_count,
         "scenario_id": scenario_id,
-        "scenario_name": scenario["scenario_name"],
+        "scenario_name": str(scenario["scenario_name"]),
+        "scenario_minimum_score": float(scenario["minimum_score"]),
+        "score_override": None if score_override is None else float(score_override),
+        "configured_time_limit_sec": int(time_limit_sec),
+        "selected_products": list(selected_products),
+        "selected_supplier_ids": list(selected_supplier_ids),
+        "selected_plant_ids": list(selected_plant_ids),
         "raw_routes": raw_df,
         "assembly": assembly_df,
         "final_routes": final_df,
         "product_summary": product_summary,
         "class_summary": class_summary,
         "supplier_summary": supplier_summary,
+        "supply_route_summary": supply_route_summary,
         "plant_summary": plant_summary,
+        "finished_route_summary": finished_route_summary,
         "cost_breakdown": cost_breakdown,
         "emission_breakdown": emission_breakdown,
         "total_cost_eur": sum(cost_breakdown.values()),
@@ -1316,6 +1384,46 @@ def benchmark_difference_figure(df: pd.DataFrame):
     return fig
 
 
+def run_score_sensitivity(
+    tables: Dict[str, pd.DataFrame],
+    base_result: Dict,
+    scores: List[float],
+    per_point_time_limit: int,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Solve one independent strategic LP for every requested subsidy score."""
+    rows = []
+    total = max(1, len(scores))
+    for index, score in enumerate(scores, start=1):
+        if progress_callback is not None:
+            percent = int(5 + 90 * (index - 1) / total)
+            progress_callback(percent, "보조금 점수 민감도", f"{score:g}점 계산 {index}/{total}")
+        point_result = solve_model(
+            tables=tables,
+            selected_products=base_result["selected_products"],
+            selected_supplier_ids=base_result["selected_supplier_ids"],
+            selected_plant_ids=base_result["selected_plant_ids"],
+            production_mode=base_result["production_mode"],
+            scenario_id=base_result["scenario_id"],
+            cap_application=base_result["cap_application"],
+            loss_rate=base_result["loss_rate"],
+            time_limit_sec=int(per_point_time_limit),
+            score_override=float(score),
+        )
+        rows.append({
+            "minimum_score": float(score),
+            "small_cap_kgco2_per_vehicle": carbon_cap_from_score("small", score),
+            "standard_cap_kgco2_per_vehicle": carbon_cap_from_score("standard", score),
+            "status": point_result.get("status"),
+            "total_supply_chain_cost_eur": point_result.get("total_cost_eur", np.nan),
+            "total_emissions_kgco2": point_result.get("total_emissions_kgco2", np.nan),
+            "wall_time_sec": point_result.get("wall_time_sec", np.nan),
+        })
+    if progress_callback is not None:
+        progress_callback(100, "민감도 완료", f"{len(scores)}개 점수의 LP 계산을 마쳤습니다.")
+    return pd.DataFrame(rows)
+
+
 def result_zip(result: Dict) -> bytes:
     memory = io.BytesIO()
     with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1323,7 +1431,9 @@ def result_zip(result: Dict) -> bytes:
             ("product_summary.csv", result["product_summary"]),
             ("class_summary.csv", result["class_summary"]),
             ("supplier_summary.csv", result["supplier_summary"]),
+            ("supply_route_summary.csv", result["supply_route_summary"]),
             ("plant_summary.csv", result["plant_summary"]),
+            ("finished_route_summary.csv", result["finished_route_summary"]),
             ("raw_material_routes.csv", result["raw_routes"]),
             ("assembly_results.csv", result["assembly"]),
             ("finished_vehicle_routes.csv", result["final_routes"]),
@@ -1336,6 +1446,12 @@ def result_zip(result: Dict) -> bytes:
 # Streamlit UI
 # -----------------------------------------------------------------------------
 def main():
+    previous_build = st.session_state.get("_loaded_app_build")
+    if previous_build != APP_BUILD:
+        st.session_state.pop("optimization_result", None)
+        st.session_state.pop("score_sensitivity_result", None)
+        st.session_state["_loaded_app_build"] = APP_BUILD
+
     st.title("탄소배출 기반 제품 보조금 제도하의 전기차 공급망 최적화")
     st.caption(
         "모든 의사결정변수를 연속화하고 운송수단별 물량분할을 허용한 전략적 공급망 LP — Google OR-Tools MPSolver"
@@ -1512,6 +1628,7 @@ def main():
                 )
             progress.progress(100, text="4/4 LP 결과 정리가 완료되었습니다.")
             st.session_state["optimization_result"] = result
+            st.session_state.pop("score_sensitivity_result", None)
             if result["status"] in {"OPTIMAL", "FEASIBLE"}:
                 st.success(f"{result['status']} 전략적 LP 해를 찾았습니다. Solver: {result['backend']}")
                 st.info("'3. 최적화 Output' 탭에서 지도·표·그림과 결과 CSV를 확인하세요.")
@@ -1616,20 +1733,106 @@ def main():
             )
             render_supply_chain_map(result, product_id=selected_map_product_id)
 
-            st.subheader("공급지·조립지 배분")
+            st.subheader("공급지·조립지·수요지 배분")
             col3, col4 = st.columns(2)
             with col3:
-                st.markdown("**원자재 공급지별 물량**")
+                st.markdown("**1단계: 원자재·배터리 공급지별 물량**")
                 st.dataframe(result["supplier_summary"], use_container_width=True, hide_index=True)
             with col4:
-                st.markdown("**조립지별 생산량**")
+                st.markdown("**2단계: 조립지별 생산량**")
                 st.dataframe(result["plant_summary"], use_container_width=True, hide_index=True)
 
-            with st.expander("상세 경로 결과"):
-                st.markdown("**원자재·배터리 공급 경로**")
+            st.markdown("**3단계: 조립지 → 프랑스 수요지 완제품 운송량**")
+            st.dataframe(result["finished_route_summary"], use_container_width=True, hide_index=True)
+            st.caption(
+                "3단계 완제품 경로는 상세 경로 expander 내부가 아니라 공급지·조립지 배분표와 같은 결과 수준에서 표시합니다."
+            )
+
+            with st.expander("상세 경로 결과: 1단계 공급지 → 2단계 조립지", expanded=False):
+                st.markdown("**제품·재질·공급지·조립지·운송수단별 원자재·배터리 경로**")
                 st.dataframe(result["raw_routes"], use_container_width=True, hide_index=True)
-                st.markdown("**완제품 운송 경로**")
-                st.dataframe(result["final_routes"], use_container_width=True, hide_index=True)
+
+            st.subheader("보조금 점수에 따른 비용·탄소 민감도")
+            st.info(
+                "각 점수에서 탄소상한을 다시 계산하고 동일한 후보지·생산방식·수요를 사용해 독립적인 전략적 LP를 풉니다. "
+                "표시된 선은 계산된 이산 점들을 연결한 것이며 점수 사이의 연속 최적해를 의미하지 않습니다."
+            )
+            with st.form("score_sensitivity_form"):
+                sa, sb, sc, sd = st.columns(4)
+                min_score = sa.number_input("최소 점수", min_value=0.0, max_value=80.0, value=40.0, step=5.0)
+                max_score = sb.number_input("최대 점수", min_value=0.0, max_value=80.0, value=80.0, step=5.0)
+                score_points = int(sc.number_input("계산 점 개수", min_value=3, max_value=7, value=5, step=1))
+                point_limit = int(sd.number_input("점당 제한시간(초)", min_value=15, max_value=120, value=30, step=5))
+                run_frontier = st.form_submit_button("점수 민감도 계산", use_container_width=True)
+
+            if run_frontier:
+                if max_score <= min_score:
+                    st.error("최대 점수는 최소 점수보다 커야 합니다.")
+                else:
+                    scores = np.linspace(float(min_score), float(max_score), score_points).tolist()
+                    sensitivity_progress = st.progress(0, text="점수 민감도 준비 중")
+                    sensitivity_text = st.empty()
+
+                    def update_sensitivity_progress(percent: int, label: str, detail: str = ""):
+                        message = label if not detail else f"{label} — {detail}"
+                        sensitivity_progress.progress(percent, text=message)
+                        sensitivity_text.caption(message)
+
+                    frontier = run_score_sensitivity(
+                        tables=tables,
+                        base_result=result,
+                        scores=scores,
+                        per_point_time_limit=point_limit,
+                        progress_callback=update_sensitivity_progress,
+                    )
+                    st.session_state["score_sensitivity_result"] = frontier
+
+            frontier = st.session_state.get("score_sensitivity_result")
+            if isinstance(frontier, pd.DataFrame) and not frontier.empty:
+                frontier_display = frontier.copy()
+                frontier_display = frontier_display.rename(columns={
+                    "minimum_score": "최소 보조금 점수",
+                    "small_cap_kgco2_per_vehicle": "소형 탄소상한(kg CO₂-eq/대)",
+                    "standard_cap_kgco2_per_vehicle": "중형·대형 탄소상한(kg CO₂-eq/대)",
+                    "status": "Solver 상태",
+                    "total_supply_chain_cost_eur": "총 공급망 비용(€)",
+                    "total_emissions_kgco2": "총 탄소배출량(kg CO₂-eq)",
+                    "wall_time_sec": "계산시간(초)",
+                })
+                st.dataframe(frontier_display, use_container_width=True, hide_index=True)
+
+                feasible_frontier = frontier[frontier["status"].isin(["OPTIMAL", "FEASIBLE"])].copy()
+                if feasible_frontier.empty:
+                    st.warning("선택한 점수 범위에서 표시할 수 있는 feasible LP 결과가 없습니다.")
+                else:
+                    feasible_frontier = feasible_frontier.sort_values("minimum_score")
+                    st.markdown("**총 공급망 비용 변화**")
+                    sensitivity_cost_fig, sensitivity_cost_ax = plt.subplots(figsize=(8, 4.2))
+                    sensitivity_cost_ax.plot(
+                        feasible_frontier["minimum_score"],
+                        feasible_frontier["total_supply_chain_cost_eur"] / 1_000_000,
+                        marker="o",
+                    )
+                    sensitivity_cost_ax.set_xlabel("최소 보조금 점수")
+                    sensitivity_cost_ax.set_ylabel("총비용 (백만 €)")
+                    sensitivity_cost_ax.grid(True, alpha=0.25)
+                    sensitivity_cost_fig.tight_layout()
+                    st.pyplot(sensitivity_cost_fig, use_container_width=True)
+                    plt.close(sensitivity_cost_fig)
+
+                    st.markdown("**총 탄소배출량 변화**")
+                    sensitivity_emission_fig, sensitivity_emission_ax = plt.subplots(figsize=(8, 4.2))
+                    sensitivity_emission_ax.plot(
+                        feasible_frontier["minimum_score"],
+                        feasible_frontier["total_emissions_kgco2"] / 1_000_000,
+                        marker="o",
+                    )
+                    sensitivity_emission_ax.set_xlabel("최소 보조금 점수")
+                    sensitivity_emission_ax.set_ylabel("총배출량 (kt CO₂-eq)")
+                    sensitivity_emission_ax.grid(True, alpha=0.25)
+                    sensitivity_emission_fig.tight_layout()
+                    st.pyplot(sensitivity_emission_fig, use_container_width=True)
+                    plt.close(sensitivity_emission_fig)
 
             st.download_button(
                 "전체 최적화 결과 CSV ZIP 다운로드",
@@ -1696,6 +1899,21 @@ def main():
 
 **운송수단 물량분할**  
 운송수단 선택 이진변수와 Big-M 제약은 제거했습니다. 따라서 비용과 탄소의 절충이 필요한 경우 같은 공급지–조립지 경로에서도 해상·철도·도로·항공 물량을 나누어 사용할 수 있습니다. 비용과 배출량이 모두 열등한 운송수단은 최적해를 바꾸지 않는 범위에서 사전 제거됩니다.
+
+**보조금 점수 민감도**  
+`run_score_sensitivity()`는 선택한 점수마다 `carbon_cap_from_score()`로 소형 및 중형·대형 탄소상한을 다시 계산한 뒤 `solve_model()`을 독립적으로 호출합니다. 따라서 그래프의 각 점은 동일한 후보지·수요·생산방식에서 계산된 별도의 LP 최적화 결과입니다.
+
+**수식과 코드의 직접 대응**
+
+- `RT[f,r,s,p,t]` → `rt[(f,r,s,p,t)]`: 공급지→조립지 원자재·배터리 연속 운송량
+- `FP[f,p]` → `fp[(f,p)]`: 조립지별 차량 생산 등가대수
+- `FT[f,p,t]` → `ft[(f,p,t)]`: 조립지→프랑스 완제품 연속 운송량
+- 원자재 수급식 → `# Raw-material requirements at each assembly location` 블록
+- 라인·모듈 배터리 수급식 → `# Continuous battery-equivalent flow conditions` 블록
+- 공급지·조립지 용량식 → `# Supplier capacities`, `# Assembly capacities` 블록
+- 수요충족식 → `# Market demand fulfillment` 블록
+- 탄소상한식 → `# Carbon-cap constraints` 블록
+- 목적함수 → 각 변수 생성 후 `model.add_obj(...)`로 생산·운송·조립 비용계수 누적
 
 **해석 주의**  
 이 결과는 개별 차량·팩·모듈의 실행계획이 아니라 대규모 연간 수요에 대한 전략적 연속 배분 최적값입니다. 원래 정수·이진조건을 가진 MILP와 비교할 경우 이 LP 목적함수값은 MILP 최소비용의 이론적 하한이 됩니다.
