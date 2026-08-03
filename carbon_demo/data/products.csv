@@ -1,7 +1,7 @@
-﻿product_id,vehicle_class,trim,product_name_ko,battery_kwh,vehicle_mass_kg,nonbattery_mass_kg,steel_share_pct,aluminum_share_pct,other_share_pct,steel_kg,aluminum_kg,other_material_kg,battery_mass_kg,main_module_count,sub_module_count,source_basis
-small_mid,small,mid,소형 미드,50,1300,1000,50,20,30,500,200,300,300,5,0,Word Table 0; mass values shown
-small_long,small,long,소형 롱,55,1400,1050,50,20,30,525,210,315,350,5,1,Word Table 0; mass values shown
-medium_mid,standard,mid,중형 미드,65,1700,1300,50,20,30,650,260,390,400,6,1,Word Table 0; aluminum/other kg derived from stated 20/30%
-medium_long,standard,long,중형 롱,70,1800,1350,50,20,30,675,270,405,450,7,0,Word Table 0; aluminum/other kg derived from stated 20/30%
-large_mid,standard,mid,대형 미드,80,2300,1700,50,20,30,850,340,510,600,8,0,Word Table 0; aluminum/other kg derived from stated 20/30%
-large_long,standard,long,대형 롱,85,2400,1750,50,20,30,875,350,525,650,8,1,Word Table 0; aluminum/other kg derived from stated 20/30%
+xpress_product_index,product_id,vehicle_class,trim,product_name_ko,battery_kwh,vehicle_mass_kg,nonbattery_mass_kg,steel_share_pct,aluminum_share_pct,other_share_pct,steel_kg,aluminum_kg,other_material_kg,battery_mass_kg,main_module_count,sub_module_count,source_basis
+1,small_mid,small,mid,소형 미드,50,1300,1000,50,20,30,500,200,300,300,5,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
+2,small_long,small,long,소형 롱,60,1400,1050,50,20,30,525,210,315,350,6,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
+3,medium_mid,standard,mid,중형 미드,70,1700,1300,50,20,30,650,260,390,400,7,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
+4,medium_long,standard,long,중형 롱,80,1800,1350,50,20,30,675,270,405,450,8,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
+5,large_mid,standard,mid,대형 미드,90,2300,1700,50,20,30,850,340,510,600,9,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
+6,large_long,standard,long,대형 롱,100,2400,1750,50,20,30,875,350,525,650,10,0,Xpress LP raw-material balance coefficients and Word vehicle mass table
