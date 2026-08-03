@@ -16,8 +16,7 @@ import numpy as np
 import pandas as pd
 from folium.plugins import Fullscreen
 from geopy.distance import geodesic
-from scipy.optimize import Bounds, linprog
-from scipy.sparse import coo_matrix, csr_matrix
+from ortools.linear_solver import pywraplp
 
 try:
     import streamlit as st
@@ -32,8 +31,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "xpress-parameter-full-lp-relaxation-poster-output-v7.0"
-APP_PACKAGE_ID = "20260803-2123-KST"
+APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-v7.1"
+APP_PACKAGE_ID = "20260803-2208-KST"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -342,55 +341,73 @@ class IndexLayout:
         return self.off_beta + (f * self.P + p) * self.T + t
 
 
-class SparseConstraintBuilder:
+class LinearConstraintBuilder:
+    """Compact row-wise storage used to build an OR-Tools MPSolver model.
+
+    Coefficients are stored only until solve time. This avoids a SciPy dependency and
+    keeps the Xpress-equivalent LP structure unchanged.
+    """
+
     def __init__(self, n_vars: int):
         self.n_vars = int(n_vars)
-        self.eq_rows: List[int] = []
         self.eq_cols: List[int] = []
         self.eq_data: List[float] = []
+        self.eq_starts: List[int] = [0]
         self.eq_rhs: List[float] = []
-        self.ub_rows: List[int] = []
         self.ub_cols: List[int] = []
         self.ub_data: List[float] = []
+        self.ub_starts: List[int] = [0]
         self.ub_rhs: List[float] = []
 
     def add_eq(self, cols: Sequence[int], vals: Sequence[float], rhs: float):
-        row = len(self.eq_rhs)
-        self.eq_rows.extend([row] * len(cols))
+        if len(cols) != len(vals):
+            raise ValueError("equality columns and coefficients must have the same length")
         self.eq_cols.extend(int(c) for c in cols)
         self.eq_data.extend(float(v) for v in vals)
         self.eq_rhs.append(float(rhs))
+        self.eq_starts.append(len(self.eq_cols))
 
     def add_le(self, cols: Sequence[int], vals: Sequence[float], rhs: float):
-        row = len(self.ub_rhs)
-        self.ub_rows.extend([row] * len(cols))
+        if len(cols) != len(vals):
+            raise ValueError("inequality columns and coefficients must have the same length")
         self.ub_cols.extend(int(c) for c in cols)
         self.ub_data.extend(float(v) for v in vals)
         self.ub_rhs.append(float(rhs))
+        self.ub_starts.append(len(self.ub_cols))
 
-    def matrices(self) -> Tuple[csr_matrix, np.ndarray, csr_matrix, np.ndarray]:
-        a_eq = coo_matrix(
-            (self.eq_data, (self.eq_rows, self.eq_cols)),
-            shape=(len(self.eq_rhs), self.n_vars),
-            dtype=float,
-        ).tocsr()
-        a_ub = coo_matrix(
-            (self.ub_data, (self.ub_rows, self.ub_cols)),
-            shape=(len(self.ub_rhs), self.n_vars),
-            dtype=float,
-        ).tocsr()
-        return a_eq, np.asarray(self.eq_rhs), a_ub, np.asarray(self.ub_rhs)
+    @property
+    def equality_count(self) -> int:
+        return len(self.eq_rhs)
+
+    @property
+    def inequality_count(self) -> int:
+        return len(self.ub_rhs)
+
+    @property
+    def nonzero_count(self) -> int:
+        return len(self.eq_data) + len(self.ub_data)
+
+    def clear_coefficients(self) -> None:
+        self.eq_cols.clear()
+        self.eq_data.clear()
+        self.eq_starts[:] = [0]
+        self.eq_rhs.clear()
+        self.ub_cols.clear()
+        self.ub_data.clear()
+        self.ub_starts[:] = [0]
+        self.ub_rhs.clear()
 
 
 @dataclass
 class LPModel:
     layout: IndexLayout
     c: np.ndarray
-    bounds: Bounds
-    a_eq: csr_matrix
-    b_eq: np.ndarray
-    a_ub: csr_matrix
-    b_ub: np.ndarray
+    lb: np.ndarray
+    ub: np.ndarray
+    rows: LinearConstraintBuilder
+    equality_count: int
+    inequality_count: int
+    matrix_nonzeros: int
     products: pd.DataFrame
     demand_values: np.ndarray
     suppliers: pd.DataFrame
@@ -414,7 +431,10 @@ class SolveResult:
     wall_time_sec: float
     x: Optional[np.ndarray]
     model: LPModel
-    scipy_status: int
+    ortools_status: int
+    solver_name: str
+    solver_version: str
+    iterations: int
 
 
 def build_xpress_relaxation_model(
@@ -519,7 +539,7 @@ def build_xpress_relaxation_model(
                     float(product["vehicle_mass_kg"]) * final_distances[p] * mode_ef[t]
                 )
 
-    rows = SparseConstraintBuilder(layout.n_vars)
+    rows = LinearConstraintBuilder(layout.n_vars)
 
     # 1) Xpress transport-mode simplex: sum_t alpha = 1, sum_t beta = 1.
     for f in range(layout.F):
@@ -690,15 +710,15 @@ def build_xpress_relaxation_model(
         else:
             raise ValueError(f"unknown cap application: {cap_application}")
 
-    a_eq, b_eq, a_ub, b_ub = rows.matrices()
     return LPModel(
         layout=layout,
         c=c,
-        bounds=Bounds(lb, ub),
-        a_eq=a_eq,
-        b_eq=b_eq,
-        a_ub=a_ub,
-        b_ub=b_ub,
+        lb=lb,
+        ub=ub,
+        rows=rows,
+        equality_count=rows.equality_count,
+        inequality_count=rows.inequality_count,
+        matrix_nonzeros=rows.nonzero_count,
         products=products,
         demand_values=demand_values,
         suppliers=suppliers,
@@ -715,40 +735,122 @@ def build_xpress_relaxation_model(
     )
 
 
+def _create_ortools_lp_solver() -> Tuple[pywraplp.Solver, str]:
+    """Create the same continuous LP with an OR-Tools backend.
+
+    GLOP is the primary backend. CLP and PDLP are fallbacks for environments
+    where a particular backend is unavailable.
+    """
+    for solver_name in ("GLOP", "CLP", "PDLP"):
+        solver = pywraplp.Solver.CreateSolver(solver_name)
+        if solver is not None:
+            return solver, solver_name
+    raise RuntimeError("OR-Tools LP solver is unavailable. Install the 'ortools' package.")
+
+
+def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None:
+    milliseconds = max(1, int(float(time_limit_sec) * 1000.0))
+    if hasattr(solver, "SetTimeLimit"):
+        solver.SetTimeLimit(milliseconds)
+    else:
+        solver.set_time_limit(milliseconds)
+
+
 def solve_lp_model(model: LPModel, time_limit_sec: int = 180) -> SolveResult:
     started = time.perf_counter()
-    result = linprog(
-        model.c,
-        A_ub=model.a_ub,
-        b_ub=model.b_ub,
-        A_eq=model.a_eq,
-        b_eq=model.b_eq,
-        bounds=np.column_stack((model.bounds.lb, model.bounds.ub)),
-        method="highs",
-        options={
-            "time_limit": max(1.0, float(time_limit_sec)),
-            "presolve": True,
-            "dual_feasibility_tolerance": 1e-7,
-            "primal_feasibility_tolerance": 1e-7,
-        },
-    )
+    solver, solver_name = _create_ortools_lp_solver()
+    _set_solver_time_limit(solver, time_limit_sec)
+    try:
+        solver.SetNumThreads(1)
+    except Exception:
+        pass
+
+    infinity = solver.infinity()
+    variables = []
+    for i in range(model.layout.n_vars):
+        lower = float(model.lb[i])
+        upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
+        variables.append(solver.NumVar(lower, upper, ""))
+
+    objective = solver.Objective()
+    for idx in np.flatnonzero(model.c):
+        objective.SetCoefficient(variables[int(idx)], float(model.c[int(idx)]))
+    objective.SetMinimization()
+
+    rows = model.rows
+    for row_index, rhs in enumerate(rows.eq_rhs):
+        constraint = solver.Constraint(float(rhs), float(rhs), "")
+        start = rows.eq_starts[row_index]
+        stop = rows.eq_starts[row_index + 1]
+        for position in range(start, stop):
+            constraint.SetCoefficient(
+                variables[rows.eq_cols[position]], rows.eq_data[position]
+            )
+
+    for row_index, rhs in enumerate(rows.ub_rhs):
+        constraint = solver.Constraint(-infinity, float(rhs), "")
+        start = rows.ub_starts[row_index]
+        stop = rows.ub_starts[row_index + 1]
+        for position in range(start, stop):
+            constraint.SetCoefficient(
+                variables[rows.ub_cols[position]], rows.ub_data[position]
+            )
+
+    # OR-Tools now owns the coefficient matrix. Release Python-side coefficient lists
+    # before Solve() to lower peak memory on Streamlit Community Cloud.
+    rows.clear_coefficients()
+
+    status_code = int(solver.Solve())
     wall = time.perf_counter() - started
     status_map = {
-        0: "OPTIMAL",
-        1: "LIMIT_REACHED",
-        2: "INFEASIBLE",
-        3: "UNBOUNDED",
-        4: "NUMERICAL_ISSUE",
+        int(pywraplp.Solver.OPTIMAL): "OPTIMAL",
+        int(pywraplp.Solver.FEASIBLE): "FEASIBLE",
+        int(pywraplp.Solver.INFEASIBLE): "INFEASIBLE",
+        int(pywraplp.Solver.UNBOUNDED): "UNBOUNDED",
+        int(pywraplp.Solver.ABNORMAL): "ABNORMAL",
+        int(getattr(pywraplp.Solver, "MODEL_INVALID", 5)): "MODEL_INVALID",
+        int(pywraplp.Solver.NOT_SOLVED): "NOT_SOLVED",
     }
-    status = status_map.get(int(result.status), f"STATUS_{result.status}")
+    status = status_map.get(status_code, f"STATUS_{status_code}")
+    has_solution = status_code in {
+        int(pywraplp.Solver.OPTIMAL),
+        int(pywraplp.Solver.FEASIBLE),
+    }
+
+    solution = None
+    objective_value = None
+    if has_solution:
+        solution = np.fromiter(
+            (variable.solution_value() for variable in variables),
+            dtype=float,
+            count=len(variables),
+        )
+        objective_value = float(objective.Value())
+
+    try:
+        iterations = int(solver.iterations())
+    except Exception:
+        iterations = 0
+    try:
+        solver_version = str(solver.SolverVersion())
+    except Exception:
+        solver_version = solver_name
+
+    message = (
+        f"{status} with OR-Tools {solver_version}; "
+        f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}"
+    )
     return SolveResult(
         status=status,
-        message=str(result.message),
-        objective_value=float(result.fun) if result.fun is not None and np.isfinite(result.fun) else None,
+        message=message,
+        objective_value=objective_value,
         wall_time_sec=wall,
-        x=np.asarray(result.x, dtype=float) if result.x is not None else None,
+        x=solution,
         model=model,
-        scipy_status=int(result.status),
+        ortools_status=status_code,
+        solver_name=solver_name,
+        solver_version=solver_version,
+        iterations=iterations,
     )
 
 
@@ -775,7 +877,7 @@ def assign_flow_quartiles(df: pd.DataFrame, flow_col: str) -> pd.DataFrame:
 
 
 def extract_solution(result: SolveResult) -> Dict:
-    if result.x is None or result.status not in {"OPTIMAL", "LIMIT_REACHED"}:
+    if result.x is None or result.status not in {"OPTIMAL", "FEASIBLE"}:
         return {
             "status": result.status,
             "message": result.message,
@@ -968,10 +1070,13 @@ def extract_solution(result: SolveResult) -> Dict:
         "objective_value": float(result.objective_value),
         "wall_time_sec": result.wall_time_sec,
         "variable_count": layout.n_vars,
-        "constraint_count": int(model.a_eq.shape[0] + model.a_ub.shape[0]),
-        "equality_count": int(model.a_eq.shape[0]),
-        "inequality_count": int(model.a_ub.shape[0]),
-        "matrix_nonzeros": int(model.a_eq.nnz + model.a_ub.nnz),
+        "constraint_count": int(model.equality_count + model.inequality_count),
+        "equality_count": int(model.equality_count),
+        "inequality_count": int(model.inequality_count),
+        "matrix_nonzeros": int(model.matrix_nonzeros),
+        "solver_name": result.solver_name,
+        "solver_version": result.solver_version,
+        "solver_iterations": result.iterations,
         "continuous_variable_count": layout.n_vars,
         "integer_variable_count": 0,
         "binary_variable_count": 0,
@@ -995,7 +1100,7 @@ def extract_solution(result: SolveResult) -> Dict:
         "finished_routes": final_df,
         "product_summary": product_df,
         "quartile_summary": quartile_df,
-        "model": model,
+        "plants": model.plants.copy(),
     }
 
 
@@ -1053,8 +1158,7 @@ def results_zip(results: Mapping[Tuple[str, str], Dict]) -> bytes:
 # Mapping and charts
 # -----------------------------------------------------------------------------
 def build_supply_map(result: Dict, height: int = 480):
-    model: LPModel = result["model"]
-    plants = model.plants
+    plants = result["plants"]
     route_df = result.get("route_aggregated", pd.DataFrame()).copy()
     final_df = result.get("finished_routes", pd.DataFrame()).copy()
 
@@ -1183,7 +1287,7 @@ def quartile_comparison_table(results: Mapping[Tuple[str, str], Dict], scenario_
 # Streamlit UI
 # -----------------------------------------------------------------------------
 def render_result_map(result: Dict, key: str, height: int = 430):
-    if result.get("status") not in {"OPTIMAL", "LIMIT_REACHED"}:
+    if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
         st.warning(f"{result.get('status')}: {result.get('message')}")
         return
     supply_map = build_supply_map(result, height=height)
@@ -1326,7 +1430,7 @@ def run_app():
         b1, b2 = st.columns(2)
         with b1:
             if st.button("선택 조합 실행", type="primary", use_container_width=True):
-                with st.spinner("희소행렬을 구성하고 HiGHS LP를 계산하는 중입니다..."):
+                with st.spinner("Xpress 구조의 연속 LP를 OR-Tools GLOP으로 계산하는 중입니다..."):
                     try:
                         res = solve_case(
                             tables, scenario_id, production_mode, cap_application, int(time_limit)
@@ -1405,7 +1509,7 @@ def run_app():
 
             valid_results = {
                 key: value for key, value in results.items()
-                if value.get("status") in {"OPTIMAL", "LIMIT_REACHED"}
+                if value.get("status") in {"OPTIMAL", "FEASIBLE"}
             }
             if valid_results:
                 st.download_button(
@@ -1419,7 +1523,7 @@ def run_app():
             if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
                 st.markdown("### 보조금 점수 민감도")
                 st.dataframe(sensitivity, hide_index=True, use_container_width=True)
-                valid = sensitivity[sensitivity["status"].isin(["OPTIMAL", "LIMIT_REACHED"])]
+                valid = sensitivity[sensitivity["status"].isin(["OPTIMAL", "FEASIBLE"])]
                 if not valid.empty:
                     fig, ax = plt.subplots(figsize=(7, 3.5))
                     ax.plot(valid["minimum_score"], valid["total_cost_eur"], marker="o")
@@ -1429,7 +1533,7 @@ def run_app():
                     st.pyplot(fig, use_container_width=False)
 
             st.markdown("### 상세 결과")
-            available = [key for key, value in results.items() if value.get("status") in {"OPTIMAL", "LIMIT_REACHED"}]
+            available = [key for key, value in results.items() if value.get("status") in {"OPTIMAL", "FEASIBLE"}]
             if available:
                 chosen = st.selectbox(
                     "상세 조회 조합",
@@ -1449,6 +1553,9 @@ def run_app():
                 with subtabs[5]:
                     st.json({
                         "status": selected.get("status"),
+                        "solver": selected.get("solver_name"),
+                        "solver_version": selected.get("solver_version"),
+                        "solver_iterations": selected.get("solver_iterations"),
                         "variables": selected.get("variable_count"),
                         "continuous_variables": selected.get("continuous_variable_count"),
                         "integer_variables": selected.get("integer_variable_count"),
