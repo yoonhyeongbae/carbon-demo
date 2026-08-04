@@ -1,4 +1,4 @@
-# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_9
+# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_10
 from __future__ import annotations
 
 import gc
@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-product-cap-score-search-v8.9"
-APP_PACKAGE_ID = "20260804-v8.9-product-cap-score-search-material-country-choice"
+APP_BUILD = "pdf-country-route-fixed-score-battery-parity-v8.10"
+APP_PACKAGE_ID = "20260804-v8.10-fixed-score-battery-parity-four-scenarios"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -68,7 +68,7 @@ MODE_LABEL = {
     "line": "라인 생산",
     "modular": "모듈 활용 분산 생산",
 }
-SCENARIO_SHORT = {"S1": "시나리오 ①", "S2": "시나리오 ②", "S3": "시나리오 ③"}
+SCENARIO_SHORT = {"S1": "시나리오 ①", "S2": "시나리오 ②", "S3": "시나리오 ③", "S4": "시나리오 ④"}
 QUARTILE_LABELS = ["Q1", "Q2", "Q3", "Q4"]
 
 # Direct land modes are used for Europe-Europe and same-continent routes.
@@ -175,6 +175,8 @@ def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
         "assembly_locations.csv": {
             "xpress_location_index", "plant_id", "location_name", "continent", "latitude",
             "longitude", "assembly_ef_kgco2_per_kg", "assembly_cost_eur_per_kg",
+            "battery_manufacturing_assembly_ef_kgco2_per_kg",
+            "battery_manufacturing_assembly_cost_eur_per_kg",
         },
         "transport_parameters.csv": {
             "transport_mode", "transport_mode_ko", "region_class",
@@ -2129,7 +2131,7 @@ def build_supply_map(result: Dict, height: int = 620):
 
 def cost_ratio_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFrame:
     rows = []
-    for scenario_id in ["S1", "S2", "S3"]:
+    for scenario_id in ["S1", "S2", "S3", "S4"]:
         line = results.get((scenario_id, "line"), {})
         modular = results.get((scenario_id, "modular"), {})
         if line.get("status") in {"OPTIMAL", "FEASIBLE"} and modular.get("status") in {"OPTIMAL", "FEASIBLE"}:
@@ -2159,7 +2161,7 @@ def baseline_change_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.Dat
             continue
         base_cost = float(baseline.get("objective_value", 0.0))
         base_emissions = float(baseline.get("total_emissions_kgco2", 0.0))
-        for scenario_id in ["S1", "S2", "S3"]:
+        for scenario_id in ["S1", "S2", "S3", "S4"]:
             result = results.get((scenario_id, mode), {})
             if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
                 continue
@@ -2534,7 +2536,7 @@ def run_app():
             "products.csv": "제품 6종",
             "demand.csv": "프랑스 수요",
             "raw_material_suppliers.csv": "국가별 생산계수·비용",
-            "assembly_locations.csv": "국가별 조립계수·비용",
+            "assembly_locations.csv": "비배터리 차량 조립 및 배터리 제조조립 계수",
             "transport_parameters.csv": "PDF 운송수단·지역별 계수",
             "country_transport_rules.csv": "국가별 허용 운송수단",
             "material_parameters.csv": "재질 손실률",
@@ -2678,13 +2680,13 @@ def run_app():
                 except Exception as exc:
                     st.exception(exc)
         with b2:
-            if st.button("6개 시나리오×생산방식 순차 실행", use_container_width=True, disabled=not selected_locations):
+            if st.button("8개 시나리오×생산방식 순차 실행", use_container_width=True, disabled=not selected_locations):
                 overall_progress = st.progress(0.0)
                 status_box = st.empty()
                 all_results = st.session_state.setdefault("xpress_results", {})
-                cases = [(s, m) for s in ["S1", "S2", "S3"] for m in ["line", "modular"]]
+                cases = [(s, m) for s in ["S1", "S2", "S3", "S4"] for m in ["line", "modular"]]
                 for i, (s, m) in enumerate(cases, start=1):
-                    prefix = f"[{i}/6] {SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: "
+                    prefix = f"[{i}/8] {SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: "
                     try:
                         all_results[(s, m)] = solve_with_policy_relaxation(
                             tables,
@@ -2759,7 +2761,7 @@ def run_app():
         if not results:
             st.info("3번 탭에서 선택 조합 또는 6개 조합을 실행하세요.")
         else:
-            for scenario in ["S1", "S2", "S3"]:
+            for scenario in ["S1", "S2", "S3", "S4"]:
                 render_poster_scenario(results, scenario)
                 st.divider()
 
@@ -2857,7 +2859,7 @@ def run_app():
                 render_map_legend_outside()
                 st.caption("아래 지도는 현재 세션에서 최적해가 계산된 모든 시나리오×생산방식 조합입니다. INFEASIBLE 조합은 경로가 없으므로 지도에 표시되지 않습니다.")
                 if st.checkbox("계산된 모든 공급망 지도 한꺼번에 표시", value=True, key="show_all_maps"):
-                    ordered_keys=[k for k in [(s,m) for s in ["S1","S2","S3"] for m in ["line","modular"]] if k in valid_results]
+                    ordered_keys=[k for k in [(s,m) for s in ["S1","S2","S3","S4"] for m in ["line","modular"]] if k in valid_results]
                     for idx in range(0,len(ordered_keys),2):
                         cols=st.columns(2)
                         for col,key in zip(cols,ordered_keys[idx:idx+2]):
@@ -3193,7 +3195,7 @@ def run_app():
 
 
 # =============================================================================
-# V8.9 overrides: per-trim policy caps, 80→0 score search, material-specific
+# V8.10 extended model: fixed per-trim policy caps, material-specific
 # country selection, and supply-chain-cost-only objective.
 # =============================================================================
 
@@ -3331,8 +3333,27 @@ def build_pdf_route_lp_model(
             )
             for s in range(layout.S):
                 rp_idx = layout.rp(f, r, s)
-                c[rp_idx] = supplier_cost[r, s]
-                emission_rp[rp_idx - layout.off_rp] = supplier_ef[r, s] * gross_multiplier
+                if r == MATERIAL_INDEX["battery"]:
+                    # Battery manufacturing is modeled consistently in both production modes.
+                    # RP is measured in kWh, while module/pack manufacturing assembly is mass-based.
+                    # Line: one completed pack is manufactured at s=p.
+                    # Modular: 10/5 kWh modules are manufactured at s; there is no extra module→pack
+                    # assembly cost or emission at p.
+                    battery_assembly_cost_per_kwh = (
+                        mass_per_flow_unit
+                        * float(plants.iloc[s]["battery_manufacturing_assembly_cost_eur_per_kg"])
+                    )
+                    battery_assembly_ef_per_kwh = (
+                        mass_per_flow_unit
+                        * float(plants.iloc[s]["battery_manufacturing_assembly_ef_kgco2_per_kg"])
+                    )
+                    c[rp_idx] = supplier_cost[r, s] + battery_assembly_cost_per_kwh
+                    emission_rp[rp_idx - layout.off_rp] = (
+                        supplier_ef[r, s] * gross_multiplier + battery_assembly_ef_per_kwh
+                    )
+                else:
+                    c[rp_idx] = supplier_cost[r, s]
+                    emission_rp[rp_idx - layout.off_rp] = supplier_ef[r, s] * gross_multiplier
                 if not active_supplier[r, s]:
                     ub[rp_idx] = 0.0
 
@@ -3343,14 +3364,24 @@ def build_pdf_route_lp_model(
                             ub[rt_idx] = 0.0
                             continue
 
-                        if r == MATERIAL_INDEX["battery"] and production_mode == "line":
-                            # Finished battery packs are produced and installed at the same location.
-                            if s != p or t != 0:
-                                ub[rt_idx] = 0.0
+                        if r == MATERIAL_INDEX["battery"]:
+                            if production_mode == "line":
+                                # Completed pack manufacturing and vehicle assembly are co-located.
+                                if s != p or t != 0:
+                                    ub[rt_idx] = 0.0
+                                    continue
+                                c[rt_idx] = 0.0
+                                emission_rt[rt_idx - layout.off_rt] = 0.0
                                 continue
-                            c[rt_idx] = 0.0
-                            emission_rt[rt_idx - layout.off_rt] = 0.0
-                            continue
+                            if s == p:
+                                # Modular production may choose the same country as line production.
+                                # In that case modules move internally with zero external transport.
+                                if t != 0:
+                                    ub[rt_idx] = 0.0
+                                    continue
+                                c[rt_idx] = 0.0
+                                emission_rt[rt_idx - layout.off_rt] = 0.0
+                                continue
 
                         if not route["raw_allowed"][s, p, t]:
                             ub[rt_idx] = 0.0
@@ -3364,12 +3395,12 @@ def build_pdf_route_lp_model(
             fp_idx = layout.fp(f, p)
             if not active_assembly[p]:
                 ub[fp_idx] = 0.0
+            # The PDF assembly factor means intermediate processing and assembly of the
+            # non-battery vehicle mass. It is applied identically in line and modular modes.
             body_mass = float(product["nonbattery_mass_kg"])
-            pack_mass = float(product["battery_mass_kg"]) if production_mode == "modular" else 0.0
-            assembly_mass = body_mass + pack_mass
-            c[fp_idx] = assembly_mass * float(plants.iloc[p]["assembly_cost_eur_per_kg"])
+            c[fp_idx] = body_mass * float(plants.iloc[p]["assembly_cost_eur_per_kg"])
             emission_fp[fp_idx - layout.off_fp] = (
-                assembly_mass * float(plants.iloc[p]["assembly_ef_kgco2_per_kg"])
+                body_mass * float(plants.iloc[p]["assembly_ef_kgco2_per_kg"])
             )
             for t in range(layout.T):
                 ft_idx = layout.ft(f, p, t)
@@ -3588,6 +3619,138 @@ def extract_solution(result: SolveResult) -> Dict:
     return out
 
 
+# Preserve the v8.9 policy-field post-processing, then correct the process accounting
+# for the v8.10 battery-manufacturing interpretation.
+_extract_solution_v89 = extract_solution
+
+
+def extract_solution(result: SolveResult) -> Dict:
+    out = _extract_solution_v89(result)
+    if result.x is None or result.status not in {"OPTIMAL", "FEASIBLE"}:
+        return out
+
+    model = result.model
+    products = model.products.set_index("product_id")
+    plants = model.plants.set_index("location_name")
+
+    supplier_df = out.get("supplier_summary")
+    if isinstance(supplier_df, pd.DataFrame) and not supplier_df.empty:
+        supplier_df = supplier_df.copy()
+        base_costs = []
+        battery_assembly_masses = []
+        battery_assembly_costs = []
+        base_emissions = []
+        battery_assembly_emissions = []
+        total_costs = []
+        total_emissions = []
+        for _, row in supplier_df.iterrows():
+            product = products.loc[str(row["product_id"])]
+            location = plants.loc[str(row["supplier_location"])]
+            amount = float(row["net_usable_production_amount"])
+            gross_amount = float(row["gross_production_amount_after_loss"])
+            is_battery = str(row["material_id"]) == "battery"
+            supplier = _material_supplier_row(
+                model,
+                MATERIAL_INDEX[str(row["material_id"])],
+                int(row["supplier_index"]) - 1,
+            )
+            base_cost = amount * float(supplier["production_cost"])
+            base_emission = gross_amount * float(supplier["production_ef"])
+            if is_battery:
+                mass_per_kwh = float(product["battery_mass_kg"]) / float(product["battery_kwh"])
+                assembly_mass = amount * mass_per_kwh
+                assembly_cost = assembly_mass * float(
+                    location["battery_manufacturing_assembly_cost_eur_per_kg"]
+                )
+                assembly_emission = assembly_mass * float(
+                    location["battery_manufacturing_assembly_ef_kgco2_per_kg"]
+                )
+            else:
+                assembly_mass = assembly_cost = assembly_emission = 0.0
+            base_costs.append(base_cost)
+            battery_assembly_masses.append(assembly_mass)
+            battery_assembly_costs.append(assembly_cost)
+            base_emissions.append(base_emission)
+            battery_assembly_emissions.append(assembly_emission)
+            total_costs.append(base_cost + assembly_cost)
+            total_emissions.append(base_emission + assembly_emission)
+        supplier_df["base_material_or_battery_production_cost_eur"] = base_costs
+        supplier_df["battery_manufacturing_assembly_mass_kg"] = battery_assembly_masses
+        supplier_df["battery_manufacturing_assembly_cost_eur"] = battery_assembly_costs
+        supplier_df["base_production_emissions_kgco2"] = base_emissions
+        supplier_df["battery_manufacturing_assembly_emissions_kgco2"] = battery_assembly_emissions
+        supplier_df["production_cost_eur"] = total_costs
+        supplier_df["production_emissions_kgco2"] = total_emissions
+        out["supplier_summary"] = supplier_df
+
+    plant_df = out.get("plant_summary")
+    if isinstance(plant_df, pd.DataFrame) and not plant_df.empty:
+        plant_df = plant_df.copy()
+        # Vehicle/plant assembly is strictly the non-battery intermediate-processing block.
+        plant_df["total_assembly_mass_kg"] = plant_df["body_assembly_mass_kg"]
+        plant_df["total_assembly_cost_eur"] = plant_df["body_assembly_cost_eur"]
+        plant_df["total_assembly_emissions_kgco2"] = plant_df["body_assembly_emissions_kgco2"]
+        for col in [
+            "modular_pack_assembly_mass_kg",
+            "modular_pack_assembly_cost_eur",
+            "modular_pack_assembly_emissions_kgco2",
+        ]:
+            if col in plant_df.columns:
+                plant_df = plant_df.drop(columns=[col])
+        plant_df["assembly_process_definition"] = (
+            "배터리를 제외한 자동차 질량의 중간가공 및 차량 조립"
+        )
+        out["plant_summary"] = plant_df
+
+    supplier_df = out.get("supplier_summary", pd.DataFrame())
+    plant_df = out.get("plant_summary", pd.DataFrame())
+    raw_df = out.get("raw_routes", pd.DataFrame())
+    final_df = out.get("finished_routes", pd.DataFrame())
+
+    base_prod_cost = float(supplier_df.get("base_material_or_battery_production_cost_eur", pd.Series(dtype=float)).sum())
+    battery_assembly_cost = float(supplier_df.get("battery_manufacturing_assembly_cost_eur", pd.Series(dtype=float)).sum())
+    inbound_cost = float(raw_df.get("transport_cost_eur", pd.Series(dtype=float)).sum())
+    body_assembly_cost = float(plant_df.get("body_assembly_cost_eur", pd.Series(dtype=float)).sum())
+    outbound_cost = float(final_df.get("transport_cost_eur", pd.Series(dtype=float)).sum())
+
+    base_prod_em = float(supplier_df.get("base_production_emissions_kgco2", pd.Series(dtype=float)).sum())
+    battery_assembly_em = float(supplier_df.get("battery_manufacturing_assembly_emissions_kgco2", pd.Series(dtype=float)).sum())
+    inbound_em = float(raw_df.get("transport_emissions_kgco2", pd.Series(dtype=float)).sum())
+    body_assembly_em = float(plant_df.get("body_assembly_emissions_kgco2", pd.Series(dtype=float)).sum())
+    outbound_em = float(final_df.get("transport_emissions_kgco2", pd.Series(dtype=float)).sum())
+
+    out["cost_breakdown"] = {
+        "재질·배터리 기초 생산비": base_prod_cost,
+        "배터리팩·모듈 제조 조립비": battery_assembly_cost,
+        "부품·모듈 운송비": inbound_cost,
+        "비배터리 차체 중간가공·조립비": body_assembly_cost,
+        "완제품 운송비": outbound_cost,
+    }
+    out["emission_breakdown"] = {
+        "재질·배터리 기초 생산": base_prod_em,
+        "배터리팩·모듈 제조 조립": battery_assembly_em,
+        "부품·모듈 운송": inbound_em,
+        "비배터리 차체 중간가공·조립": body_assembly_em,
+        "완제품 운송": outbound_em,
+    }
+    out["total_emissions_kgco2"] = sum(out["emission_breakdown"].values())
+    out["supply_chain_cost_eur"] = sum(out["cost_breakdown"].values())
+    out["objective_reconstruction_gap_eur"] = (
+        float(out.get("objective_value", 0.0)) - out["supply_chain_cost_eur"]
+    )
+    out["battery_process_definition"] = (
+        "라인은 완성 배터리팩, 모듈 방식은 10/5kWh 모듈을 생산국가 s에서 제조·조립하며 "
+        "동일한 국가별 질량기반 제조조립계수를 적용한다. 모듈→팩 추가 조립비·배출량은 0이다."
+    )
+    applied = out.get("applied_policy_score")
+    out["highest_feasible_score"] = np.nan
+    out["subsidy_eligible"] = (
+        None if applied is None or not np.isfinite(float(applied))
+        else bool(out.get("all_product_caps_met", False))
+    )
+    return out
+
+
 def solve_case(
     tables: Mapping[str, pd.DataFrame],
     scenario_id: str,
@@ -3751,7 +3914,7 @@ def render_country_selection_by_material(
     """Material-specific supplier selection plus a separate assembly-country selection."""
     ordered_countries = [str(v) for v in plants.sort_values("xpress_location_index")["location_name"].tolist()]
     selected_map: Dict[str, List[str]] = {}
-    labels = {**MATERIAL_LABEL, "assembly": "차량·배터리팩 조립"}
+    labels = {**MATERIAL_LABEL, "assembly": "비배터리 차체·차량 조립"}
 
     with st.expander("재질별 생산국가·조립국가 선택", expanded=True):
         st.caption(
@@ -3775,10 +3938,16 @@ def render_country_selection_by_material(
                         suppliers[suppliers["material_id"] == key]
                         .set_index("location_name")["production_ef"].astype(float).to_dict()
                     )
-                    st.caption("괄호 안 숫자는 해당 국가에 현재 매핑된 PDF 기반 생산 배출계수입니다.")
+                    if key == "battery":
+                        st.caption(
+                            "괄호 안 숫자는 배터리 기초 생산 EF(kg CO₂-eq/kWh)입니다. "
+                            "배터리팩/모듈 제조 조립에는 같은 생산국가의 별도 질량기반 계수를 추가 적용합니다."
+                        )
+                    else:
+                        st.caption("괄호 안 숫자는 해당 국가에 현재 매핑된 PDF 기반 생산 배출계수입니다.")
                 else:
                     ef_map = plants.set_index("location_name")["assembly_ef_kgco2_per_kg"].astype(float).to_dict()
-                    st.caption("괄호 안 숫자는 해당 국가의 조립 배출계수입니다.")
+                    st.caption("괄호 안 숫자는 배터리를 제외한 자동차 질량의 중간가공·차량 조립 배출계수입니다.")
 
                 cols = st.columns(4)
                 chosen: List[str] = []
@@ -3800,11 +3969,17 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     st.header("전기자동차 공급망·탄소 최적화 SaaS 개요")
     st.markdown(
         """
-이 SaaS는 여러 국가에서 소형·중형·대형 전기자동차의 미드·롱 트림을 생산하여 프랑스 수요를 정확히 충족하는 공급망을 설계합니다.
-각 차량 트림별로 생산국가, 재질 생산량, 조립국가, 운송경로와 물량을 결정하며, **공급망 총비용을 최소화**합니다.
+이 SaaS는 여러 국가에서 6개 전기자동차 트림을 생산하여 프랑스 수요를 정확히 충족하는 공급망을 설계합니다.
+각 시나리오에서 **생산·운송·조립의 총 공급망 비용을 최소화**하며, 정책 시나리오에서는 각 차량 트림이
+60점·65점·70점에 해당하는 개별 탄소상한을 만족해야 합니다.
 
-정책 시나리오에서는 회사 전체 배출량을 하나의 상한과 비교하지 않습니다. 각 차량 트림이 자신의 탄소배출량 상한을 개별적으로 만족해야 합니다.
-80점 기준이 너무 엄격해 해가 없으면 75점, 70점, 65점처럼 5점씩 낮추어 **가장 높은 feasible 점수**를 찾습니다. 각 점수에서 반환되는 해는 비용 최소 LP의 `OPTIMAL` 해여야 합니다.
+- **시나리오 ①**: 탄소점수 제약이 없는 회사 baseline
+- **시나리오 ②**: 60점 고정 상한
+- **시나리오 ③**: 65점 고정 상한
+- **시나리오 ④**: 70점 고정 상한
+
+점수는 자동으로 낮추지 않습니다. 각 시나리오는 지정된 점수에서 독립적인 비용 최소 LP로 계산되며,
+`OPTIMAL`은 그 제약 아래에서 가장 저렴한 공급망임을 뜻합니다.
         """
     )
 
@@ -3814,195 +3989,182 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
         inputs = pd.DataFrame([
             ["차량·수요", "6개 트림의 질량, 배터리용량, 재질 필요량, 프랑스 수요"],
             ["재질별 생산국가", "철강·알루미늄·기타 원자재·배터리/모듈별 허용 국가"],
-            ["조립국가", "차량 및 배터리팩을 조립할 수 있는 허용 국가"],
-            ["비용·배출계수", "국가별 생산·조립 비용/EF와 운송수단·권역별 비용/EF"],
-            ["정책점수", "80점부터 5점 단위로 평가할 차량 트림별 탄소상한"],
+            ["차량 조립국가", "배터리를 제외한 차체 중간가공과 완성차 조립 허용 국가"],
+            ["배터리 제조조립", "생산국가별 배터리팩/모듈 질량기반 제조조립 비용·EF"],
+            ["비용·배출계수", "국가별 생산·조립 계수와 운송수단·권역별 계수"],
+            ["정책 시나리오", "무정책, 60점, 65점, 70점"],
         ], columns=["Input", "사용자 관점의 의미"])
-        show_explained_dataframe(inputs, "Input", "각 행은 하나의 입력 그룹입니다.", value_meaning="오른쪽 열은 해당 그룹에 포함되는 구체적인 값입니다.")
+        show_explained_dataframe(inputs, "Input", "각 행은 하나의 입력 그룹입니다.", value_meaning="오른쪽 열은 최적화에 들어가는 구체적인 입력입니다.")
     with c2:
         outputs = pd.DataFrame([
-            ["최적 공급망 비용", "생산·부품운송·차체/팩조립·완제품운송 비용의 최소값"],
-            ["트림별 탄소배출량", "각 차량 트림 1대당 및 총수요에 대한 실제 최적화 배출량"],
-            ["최고 feasible 점수", "80점부터 낮췄을 때 처음으로 OPTIMAL 해가 존재한 점수"],
-            ["정책 충족 여부", "최고 feasible 점수가 시나리오 요구점수(60/65점) 이상인지"],
+            ["최적 공급망 비용", "고정된 시나리오 제약 아래 생산·운송·조립 비용의 최소값"],
+            ["트림별 탄소배출량", "각 차량 트림 1대당 실제 배출량과 정책상한 충족 여부"],
             ["회사 총탄소배출량", "모든 트림의 실제 최적화 배출량을 합한 결과 지표"],
-            ["공급망 지도", "재질별 공급지, 조립지, 운송수단과 물량분포"],
+            ["공급망 구조", "재질/배터리 생산국가, 차량 조립국가, 운송경로와 물량"],
+            ["생산방식 비교", "라인과 모듈 방식의 비용·배출량·경로 차이"],
         ], columns=["Output", "사용자 관점의 의미"])
-        show_explained_dataframe(outputs, "Output", "각 행은 하나의 결과 그룹입니다.", value_meaning="오른쪽 열은 사용자가 결과에서 해석할 내용을 설명합니다.")
+        show_explained_dataframe(outputs, "Output", "각 행은 하나의 결과 그룹입니다.", value_meaning="오른쪽 열은 사용자가 해석할 결과입니다.")
 
-    st.markdown("### 정책점수와 탄소상한")
+    st.markdown("### 정책점수와 트림별 탄소상한")
     score_table = pd.DataFrame([
-        [80, carbon_cap_from_score("small", 80), carbon_cap_from_score("standard", 80)],
-        [75, carbon_cap_from_score("small", 75), carbon_cap_from_score("standard", 75)],
-        [70, carbon_cap_from_score("small", 70), carbon_cap_from_score("standard", 70)],
-        [65, carbon_cap_from_score("small", 65), carbon_cap_from_score("standard", 65)],
         [60, carbon_cap_from_score("small", 60), carbon_cap_from_score("standard", 60)],
-    ], columns=["점수", "소형 미드·롱 상한(kg CO₂-eq/대)", "중형·대형 미드·롱 상한(kg CO₂-eq/대)"])
+        [65, carbon_cap_from_score("small", 65), carbon_cap_from_score("standard", 65)],
+        [70, carbon_cap_from_score("small", 70), carbon_cap_from_score("standard", 70)],
+    ], columns=["고정 점수", "기타차량 상한(kg CO₂-eq/대)", "기준차량 상한(kg CO₂-eq/대)"])
     show_explained_dataframe(
-        score_table, "점수별 트림 상한 예시",
-        "각 행은 하나의 시험 점수입니다.",
-        value_meaning="동일 차급의 미드·롱은 같은 1대당 상한을 사용하지만 각각 별도의 제약식을 만족해야 합니다.",
-    )
-
-    st.markdown("### 회사 baseline과 정책상한의 구분")
-    st.markdown(
-        """
-- **회사 baseline 배출량**: 시나리오 ①(보조금·탄소상한 없음)에서 현재 입력·선택조건으로 계산된 실제 최적 공급망 배출량입니다. 정책상한이 아닙니다.
-- **정책상한**: 특정 점수에서 차량 트림 1대에 허용되는 외생 파라미터입니다.
-- **회사 총탄소배출량**: 여섯 트림의 최적화된 실제 배출량을 합한 결과 지표이며, 개별 트림 상한을 합쳐 만든 하나의 제약으로 사용하지 않습니다.
-
-실제 기업의 역사적 배출량을 baseline으로 사용하려면 생산국가·물량·운송경로 입력을 현재 기업 공급망과 일치하도록 설정해야 합니다. 기본 S1은 모형이 계산한 무정책 비용최소 baseline입니다.
-        """
+        score_table, "시나리오별 점수 상한",
+        "각 행은 하나의 정책 시나리오에 적용되는 점수입니다.",
+        value_meaning="각 트림은 자신의 차량분류에 해당하는 1대당 상한을 개별적으로 만족해야 합니다.",
     )
 
     st.markdown("### 라인 생산 방식: 3개 Stage")
     line = pd.DataFrame([
-        ["Stage 1", "철강·알루미늄·기타 원자재 생산", "재질별로 사용자가 허용한 국가 중 최적 생산국가와 생산량을 결정"],
-        ["Stage 2", "차체·완성 배터리팩·전기자동차 조립", "비배터리 원자재를 조립하고, 차량 조립국가와 동일한 위치에서 완성팩을 생산·결합"],
-        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족"],
+        ["Stage 1", "재질·완성 배터리팩 생산", "철강·알루미늄·기타 원자재와 완성 배터리팩을 생산합니다. 배터리팩 제조조립 비용·배출량은 팩 질량과 생산국가 계수로 계산합니다."],
+        ["Stage 2", "차체 중간가공·차량 조립", "Stage 1의 비배터리 재질을 조립하고 같은 위치에서 생산된 완성 배터리팩을 차량에 결합합니다. 차량 조립계수는 비배터리 질량에만 적용됩니다."],
+        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족합니다."],
     ], columns=["Stage", "공정", "코드가 결정하는 내용"])
-    show_explained_dataframe(line, "라인 생산 Stage", "각 행은 공급망의 한 Stage입니다.", value_meaning="Stage 2에서는 배터리팩 생산지와 차량 조립지가 반드시 동일합니다.")
+    show_explained_dataframe(line, "라인 생산 Stage", "각 행은 공급망의 한 단계입니다.", value_meaning="라인 방식에서는 완성팩 생산국가와 차량 조립국가가 동일합니다.")
 
     st.markdown("### 모듈 활용 분산 생산 방식: 3개 Stage")
     modular = pd.DataFrame([
-        ["Stage 1", "철강·알루미늄·기타 원자재·10/5kWh 모듈 생산", "재질/모듈별로 허용된 국가 중 최적 생산국가와 생산량을 결정"],
-        ["Stage 2", "차체·완성 배터리팩·전기자동차 조립", "다른 국가에서 받은 모듈을 팩 조립국가 p에서 완성팩으로 조립하고 차량에 결합"],
-        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족"],
+        ["Stage 1", "재질·10/5kWh 모듈 생산", "철강·알루미늄·기타 원자재와 10/5kWh 모듈을 생산합니다. 모듈 제조조립 비용·배출량은 총 모듈 질량과 생산국가 계수로 계산합니다."],
+        ["Stage 2", "차체 중간가공·차량 조립", "모듈을 필요한 배터리용량으로 구성해 차량에 결합합니다. 별도의 모듈→팩 조립비·배출량은 없으며, 차량 조립계수는 비배터리 질량에만 적용됩니다."],
+        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족합니다."],
     ], columns=["Stage", "공정", "코드가 결정하는 내용"])
-    show_explained_dataframe(modular, "모듈 분산 생산 Stage", "각 행은 공급망의 한 Stage입니다.", value_meaning="모듈 생산국가 s와 팩·차량 조립국가 p는 달라도 됩니다.")
-    st.info("모듈 생산 배출계수는 생산국가 s의 배터리 EF를 사용하고, 모듈→팩 조립 배출계수는 실제 팩이 조립되는 국가 p의 assembly EF를 사용합니다.")
+    show_explained_dataframe(modular, "모듈 분산 생산 Stage", "각 행은 공급망의 한 단계입니다.", value_meaning="모듈 생산국가 s와 차량 조립국가 p는 달라도 되며, s=p도 허용됩니다.")
+
+    st.success(
+        "두 방식은 동일한 배터리 기초 생산계수와 동일한 국가별 질량기반 제조조립계수를 사용합니다. "
+        "모듈 방식에만 추가 팩 조립비·배출량을 부과하지 않으며, 같은 국가를 선택하면 라인 방식의 배터리 흐름을 재현할 수 있습니다."
+    )
 
 
 def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.header("수학모형과 코드의 대응")
-    st.info("현재 탭은 v8.9의 트림별 탄소상한, 80→5점 탐색, 재질별 국가선택, 공급망 비용 최소화 구조를 설명합니다.")
+    st.info("v8.10: 라인·모듈의 배터리 제조조립 경계를 동일하게 맞추고, S2=60점·S3=65점·S4=70점 고정 시나리오를 적용합니다.")
 
     st.markdown("### 5.1 집합")
     set_rows = [
         (r"F", "차량 트림 집합", "소형/중형/대형 × 미드/롱, 총 6개"),
         (r"R", "재질 집합", "철강, 알루미늄, 기타 원자재, 배터리/모듈"),
-        (r"S", "재질·모듈 생산국가 집합", "재질별 체크박스로 허용된 국가"),
-        (r"P", "차량·배터리팩 조립국가 집합", "조립 체크박스로 허용된 국가"),
+        (r"S", "재질·배터리 생산국가 집합", "재질별 체크박스로 허용된 국가"),
+        (r"P", "비배터리 차체·차량 조립국가 집합", "조립 체크박스로 허용된 국가"),
         (r"K", "운송경로 집합", "도로, 철도, 해상+도로, 해상+철도, 항공+도로, 항공+철도"),
     ]
     for symbol, name, desc in set_rows:
-        c1, c2 = st.columns([1, 5])
+        c1,c2=st.columns([1,5]);
         with c1: st.latex(symbol)
         with c2: st.markdown(f"**{name}** — {desc}")
 
-    st.markdown("### 5.2 결정변수와 변수종류")
-    var_rows = [
-        (r"RP_{frs}\ge0", "연속변수", "차량 f용 재질 r을 국가 s에서 생산하는 순사용 가능량"),
-        (r"RT_{frspk}\ge0", "연속변수", "재질/모듈을 s에서 p로 경로 k로 보내는 양"),
-        (r"FP_{fp}\ge0", "연속변수", "차량 f를 국가 p에서 조립하는 차량 등가량"),
-        (r"FT_{fpk}\ge0", "연속변수", "완성차를 p에서 프랑스로 경로 k로 보내는 차량 등가량"),
-        (r"ZL_{fsp}\ge0", "연속변수", "라인 생산의 완성팩 등가량"),
-        (r"ZM_{fsp},ZS_{fsp}\ge0", "연속변수", "모듈 생산의 10kWh/5kWh 모듈 수량"),
+    st.markdown("### 5.2 결정변수")
+    var_rows=[
+        (r"RP_{frs}\ge0","연속변수","차량 f용 재질 r을 국가 s에서 생산하는 양"),
+        (r"RT_{frspk}\ge0","연속변수","재질/모듈을 s에서 p로 경로 k로 보내는 양"),
+        (r"FP_{fp}\ge0","연속변수","차량 f를 국가 p에서 조립하는 차량 등가량"),
+        (r"FT_{fpk}\ge0","연속변수","완성차를 p에서 프랑스로 보내는 차량 등가량"),
+        (r"ZL_{fpp}\ge0","연속변수","라인 생산의 완성 배터리팩 등가량"),
+        (r"ZM_{fsp},ZS_{fsp}\ge0","연속변수","모듈 방식의 10kWh/5kWh 모듈 수량"),
     ]
-    for eq, kind, desc in var_rows:
-        c1, c2, c3 = st.columns([2, 1, 5])
+    for eq,kind,desc in var_rows:
+        c1,c2,c3=st.columns([2,1,5]);
         with c1: st.latex(eq)
         with c2: st.markdown(f"**{kind}**")
         with c3: st.write(desc)
-    st.caption("현재 코드에는 정수변수와 이진 결정변수가 없습니다. 국가 허용값은 사용자가 정하는 고정 0/1 파라미터입니다.")
+    st.caption("정수·이진 결정변수는 없으며, 국가 허용값은 사용자 입력의 고정 0/1 파라미터입니다.")
 
     st.markdown("### 5.3 주요 파라미터")
-    param_rows = [
-        (r"D_f", "차량 f의 프랑스 수요량"),
-        (r"a_{fr}", "차량 f 한 대에 필요한 재질 r의 양"),
-        (r"c^{RP},c^{RT},c^{FP},c^{FT}", "생산·운송·조립·완제품 운송 비용계수"),
-        (r"e^{RP},e^{RT},e^{FP},e^{FT}", "생산·운송·조립·완제품 운송 탄소계수"),
-        (r"L_r", "철강·알루미늄 손실률"),
-        (r"Cap_{rs}", "재질 r-국가 s 생산용량"),
-        (r"A^{PROD}_{rs}\in\{0,1\}", "재질 r을 국가 s에서 생산하도록 사용자가 허용했는지"),
-        (r"A^{ASM}_{p}\in\{0,1\}", "국가 p에서 차량·팩 조립을 허용했는지"),
-        (r"q", "현재 시험하는 보조금 탄소점수: 80,75,70,…,0"),
-        (r"\bar E_{g(f)}(q)", "점수 q에서 차량 f의 차급에 적용되는 1대당 탄소상한"),
+    params=[
+        (r"D_f","차량 f의 프랑스 수요량"),
+        (r"a_{fr}","차량 f 한 대에 필요한 재질 r의 양"),
+        (r"B_f,M_f^{bat}","차량 f의 배터리용량(kWh)과 배터리질량(kg)"),
+        (r"c^{BAT}_{s},e^{BAT}_{s}","국가 s의 배터리 기초 생산비·생산 EF(kWh 기준)"),
+        (r"c^{BASM}_{s},e^{BASM}_{s}","국가 s의 팩/모듈 제조조립 비용·EF(kg-battery 기준)"),
+        (r"c^{BODY}_{p},e^{BODY}_{p}","국가 p의 비배터리 차체 중간가공·차량 조립 비용·EF(kg-body 기준)"),
+        (r"A^{PROD}_{rs},A^{ASM}_{p}","재질별 생산국가와 차량 조립국가 허용 0/1 파라미터"),
+        (r"q_s","시나리오 고정점수: S2=60, S3=65, S4=70"),
+        (r"ar E_{g(f)}(q_s)","점수 q_s에서 트림 f에 적용되는 1대당 탄소상한"),
     ]
-    for eq, desc in param_rows:
-        c1, c2 = st.columns([2, 5])
+    for eq,desc in params:
+        c1,c2=st.columns([2,5]);
         with c1: st.latex(eq)
         with c2: st.write(desc)
 
-    st.markdown("### 5.4 목적함수: 원래 공급망 비용 최소화")
+    st.markdown("### 5.4 목적함수")
     st.latex(r"""
-    \min Z=
-    \sum_{f,r,s}c^{RP}_{rs}RP_{frs}
-    +\sum_{f,r,s,p,k}c^{RT}_{spk}RT_{frspk}
-    +\sum_{f,p}c^{FP}_{fp}FP_{fp}
-    +\sum_{f,p,k}c^{FT}_{pk}FT_{fpk}
+    \min Z= C^{BASEPROD}+C^{BATASM}+C^{IN}+C^{BODY}+C^{OUT}
     """)
-    st.markdown("보조금 손실비용은 목적함수에 포함하지 않습니다. PDF의 보조금은 구매자 혜택이며 제조기업의 직접 수입으로 보지 않습니다.")
+    st.markdown("재질·배터리 기초 생산, 팩/모듈 제조조립, 부품운송, 비배터리 차체·차량 조립, 완제품 운송 비용의 합을 최소화합니다.")
 
-    st.markdown("### 5.5 핵심 물량 제약")
-    equations = [
-        (r"\sum_{p,k}FT_{fpk}=D_f", "트림별 프랑스 수요를 정확히 충족"),
-        (r"FP_{fp}=\sum_kFT_{fpk}", "조립수량과 완제품 출하량 일치"),
-        (r"RP_{frs}=\sum_{p,k}RT_{frspk}", "공급지 생산량과 총출하량 일치"),
-        (r"\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp}", "조립지 유입 재질량과 차량 생산 필요량 일치"),
-        (r"\sum_fRP_{frs}\le Cap_{rs}", "재질-국가 생산용량 준수"),
-        (r"RP_{frs}=0\ \text{if }A^{PROD}_{rs}=0", "미선택 재질 생산국가 사용 금지"),
-        (r"FP_{fp}=FT_{fpk}=0\ \text{if }A^{ASM}_{p}=0", "미선택 조립국가 사용 금지"),
-    ]
-    for eq, desc in equations:
+    st.markdown("### 5.5 공통 물량 제약")
+    for eq,desc in [
+        (r"\sum_{p,k}FT_{fpk}=D_f","트림별 프랑스 수요의 정확한 충족"),
+        (r"FP_{fp}=\sum_kFT_{fpk}","차량 조립량과 완제품 출하량 일치"),
+        (r"RP_{frs}=\sum_{p,k}RT_{frspk}","생산량과 공급지 출하량 일치"),
+        (r"\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp}","조립지 유입 비배터리 재질량과 필요량 일치"),
+        (r"\sum_fRP_{frs}\le Cap_{rs}","재질-국가 생산용량 준수"),
+    ]:
         st.latex(eq); st.caption(desc)
 
-    st.markdown("### 5.6 생산방식별 배터리 제약")
+    st.markdown("### 5.6 배터리 제조조립 비용·배출량")
+    st.latex(r"m_f^{bat/kWh}=rac{M_f^{bat}}{B_f}")
+    st.latex(r"c^{RP}_{f,bat,s}=c^{BAT}_{s}+m_f^{bat/kWh}c^{BASM}_{s}")
+    st.latex(r"e^{RP}_{f,bat,s}=e^{BAT}_{s}+m_f^{bat/kWh}e^{BASM}_{s}")
+    st.markdown(
+        "배터리 RP는 kWh 단위이므로 차량별 kg/kWh를 이용해 질량기반 제조조립계수를 환산합니다. "
+        "라인은 완성팩 질량, 모듈 방식은 운송되는 전체 모듈 질량에 적용하며 총 배터리질량이 같으면 제조조립 총량도 같습니다."
+    )
+    st.warning("모듈→팩 단계에는 별도의 비용과 배출량을 추가하지 않습니다.")
+
+    st.markdown("### 5.7 생산방식별 배터리 제약")
     st.markdown("**라인 생산**")
-    st.latex(r"s=p")
-    st.latex(r"RT_{f,bat,p,p,k_0}=B_fZL_{fpp},\qquad ZL_{fpp}=FP_{fp}")
-    st.markdown("완성팩 생산국가와 차량 조립국가가 동일하며, 배터리 국제운송을 허용하지 않습니다.")
+    st.latex(r"s=p,\qquad RT_{f,bat,p,p,k_0}=B_fZL_{fpp},\qquad ZL_{fpp}=FP_{fp}")
+    st.markdown("완성팩 생산과 차량 조립이 동일 국가에서 이루어지고 외부 배터리 운송은 0입니다.")
     st.markdown("**모듈 활용 분산 생산**")
     st.latex(r"\sum_kRT_{f,bat,s,p,k}=10ZM_{fsp}+5ZS_{fsp}")
     st.latex(r"\sum_{s,k}RT_{f,bat,s,p,k}=B_fFP_{fp}")
-    st.markdown("모듈 생산국가 s와 팩·차량 조립국가 p가 달라도 되며, p에서 완성팩 용량을 충족합니다.")
+    st.markdown("모듈 생산국가와 차량 조립국가는 달라도 되고 같아도 됩니다. s=p이면 내부이동 비용·배출량은 0이므로 라인 선택을 재현할 수 있습니다.")
 
-    st.markdown("### 5.7 트림별 탄소배출량과 상한")
-    st.latex(r"C_f=C_f^{RP}+C_f^{RT}+C_f^{FP}+C_f^{FT}")
-    st.markdown("각 차량 트림의 생산·부품운송·차체/팩조립·완제품운송 배출량을 합산합니다.")
-    st.latex(r"C_f\le \bar E_{g(f)}(q)D_f\qquad\forall f\in F")
-    st.markdown("여섯 트림 각각에 별도의 상한제약이 생성됩니다. 한 트림의 저배출 여유로 다른 트림의 초과배출을 상쇄할 수 없습니다.")
-    st.latex(r"\bar E_{small}(q)=17000-\frac{q}{80}(17000-6000)")
-    st.latex(r"\bar E_{standard}(q)=21000-\frac{q}{80}(21000-12000)")
-    st.markdown("소형 미드·롱은 small 상한을, 중형·대형의 미드·롱은 standard 상한을 각각 사용합니다. 60점에서는 8,750kg과 14,250kg입니다.")
+    st.markdown("### 5.8 비배터리 차량 조립")
+    st.latex(r"C^{BODY}=\sum_{f,p}M_f^{nonbat}c_p^{BODY}FP_{fp}")
+    st.latex(r"E^{BODY}=\sum_{f,p}M_f^{nonbat}e_p^{BODY}FP_{fp}")
+    st.markdown("`assembly_ef_kgco2_per_kg`는 배터리를 제외한 자동차 단위질량의 중간가공·차량 조립 EF로만 사용합니다. 두 생산방식에 동일합니다.")
 
-    st.markdown("### 5.8 80점부터 5점 단위 탐색")
-    st.latex(r"q\in\{80,75,70,\ldots,0\}")
-    st.markdown(
-        "각 q에서 위 트림별 상한을 적용한 비용 최소 LP를 새로 풉니다. INFEASIBLE이면 다음 5점 낮은 q로 이동합니다. "
-        "처음 OPTIMAL이 나온 q가 5점 격자에서 가능한 최고 점수입니다. FEASIBLE만 나오고 최적성이 증명되지 않으면 최종결과로 채택하지 않습니다."
-    )
+    st.markdown("### 5.9 트림별 탄소상한")
+    st.latex(r"E_f=E_f^{PROD}+E_f^{BATASM}+E_f^{IN}+E_f^{BODY}+E_f^{OUT}")
+    st.latex(r"E_f\lear E_{g(f)}(q_s)D_f\qquadorall f")
+    st.markdown("각 트림이 독립적으로 상한을 만족해야 하며, 다른 트림의 여유로 초과분을 상쇄할 수 없습니다.")
+    st.latex(r"ar E_{other}(q)=17000-rac{q}{80}(17000-6000)")
+    st.latex(r"ar E_{reference}(q)=21000-rac{q}{80}(21000-12000)")
 
-    st.markdown("### 5.9 회사 총탄소배출량과 baseline")
-    st.latex(r"C^{Company}=\sum_f C_f")
-    st.markdown("이 값은 결과 지표입니다. 하나의 fleet-total 탄소상한 제약으로 사용하지 않습니다.")
-    st.markdown("S1 무정책 최적해의 실제 배출량을 모형상 회사 baseline으로 사용하여 정책 시나리오 결과와 비교합니다.")
+    st.markdown("### 5.10 시나리오")
+    scenario_df=tables["scenarios.csv"][["scenario_id","scenario_name","minimum_score","apply_carbon_cap","small_cap_kgco2_per_vehicle","standard_cap_kgco2_per_vehicle"]].copy()
+    show_explained_dataframe(scenario_df,"고정 정책 시나리오","각 행은 독립적으로 계산되는 한 정책강도입니다.",value_meaning="S1은 무정책, S2는 60점, S3는 65점, S4는 70점입니다. 점수를 자동으로 낮추지 않습니다.")
+
+    st.markdown("### 5.11 회사 총탄소배출량")
+    st.latex(r"E^{Company}=\sum_fE_f")
+    st.markdown("회사 총배출량은 결과 지표이며 하나의 합산 탄소상한 제약으로 사용하지 않습니다.")
 
 
 def render_solver_metrics(result: Dict):
-    status = str(result.get("status", "NOT_RUN"))
-    if status != "OPTIMAL":
-        st.error(f"{status}: {result.get('message', '최적해를 찾지 못했습니다.')}")
-        if status == "INFEASIBLE":
-            st.caption("현재 점수의 트림별 상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없다는 뜻입니다. 변수 수가 많아 수행능력을 넘었다는 뜻은 아닙니다.")
-        if status == "NOT_OPTIMAL":
-            st.caption("해는 발견했지만 최적성이 증명되지 않았습니다. Solver 제한시간을 늘려 다시 실행하세요.")
+    status=str(result.get("status","NOT_RUN"))
+    if status!="OPTIMAL":
+        st.error(f"{status}: {result.get('message','최적해를 찾지 못했습니다.')}")
+        if status=="INFEASIBLE":
+            st.caption("현재 고정점수의 트림별 상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없습니다. 수행능력 초과를 뜻하지 않습니다.")
         return
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("최적 공급망 비용", f"€{float(result.get('objective_value', 0.0)):,.0f}")
-    c2.metric("회사 총탄소배출량", f"{float(result.get('total_emissions_kgco2', 0.0)):,.0f} kg CO₂-eq")
-    score = result.get("highest_feasible_score")
-    c3.metric("최고 feasible 점수", "해당 없음" if score is None or not np.isfinite(float(score)) else f"{float(score):.0f}점")
-    c4.metric("양의 부품 경로", f"{len(result.get('route_aggregated', [])):,}")
-    eligible = result.get("subsidy_eligible")
-    if eligible is not None:
-        minimum = float(result.get("scenario_minimum_score", 0.0))
-        st.caption(f"시나리오 요구점수 {minimum:.0f}점 · 보조금 탄소기준 충족: {'예' if eligible else '아니오'} · 모든 트림 개별상한 충족: {'예' if result.get('all_product_caps_met', False) else '아니오'}")
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("최적 공급망 비용",f"€{float(result.get('objective_value',0)):,.0f}")
+    c2.metric("회사 총탄소배출량",f"{float(result.get('total_emissions_kgco2',0)):,.0f} kg CO₂-eq")
+    score=result.get("applied_policy_score")
+    c3.metric("적용 정책점수","상한 없음" if score is None or not np.isfinite(float(score)) else f"{float(score):.0f}점")
+    c4.metric("양의 부품 경로",f"{len(result.get('route_aggregated',[])):,}")
+    if score is not None and np.isfinite(float(score)):
+        st.caption(f"모든 트림의 {float(score):.0f}점 개별상한 충족: {'예' if result.get('all_product_caps_met',False) else '아니오'}")
 
 
 def cost_ratio_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFrame:
     rows = []
-    for scenario_id in ["S1", "S2", "S3"]:
+    for scenario_id in ["S1", "S2", "S3", "S4"]:
         line = results.get((scenario_id, "line"), {})
         modular = results.get((scenario_id, "modular"), {})
         if line.get("status") == "OPTIMAL" and modular.get("status") == "OPTIMAL":
@@ -4012,9 +4174,9 @@ def cost_ratio_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFram
                 "scenario_id": scenario_id,
                 "scenario_name": SCENARIO_SHORT[scenario_id],
                 "line_cost": line_cost,
-                "line_score": line.get("highest_feasible_score"),
+                "line_score": line.get("applied_policy_score"),
                 "modular_cost": modular_cost,
-                "modular_score": modular.get("highest_feasible_score"),
+                "modular_score": modular.get("applied_policy_score"),
                 "modular_to_line_cost_ratio": modular_cost / line_cost if line_cost else np.nan,
             })
     return pd.DataFrame(rows)
@@ -4028,7 +4190,7 @@ def baseline_change_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.Dat
             continue
         base_cost = float(baseline.get("objective_value", 0.0))
         base_emissions = float(baseline.get("total_emissions_kgco2", 0.0))
-        for scenario_id in ["S1", "S2", "S3"]:
+        for scenario_id in ["S1", "S2", "S3", "S4"]:
             result = results.get((scenario_id, mode), {})
             if result.get("status") != "OPTIMAL":
                 continue
@@ -4051,11 +4213,11 @@ def baseline_change_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.Dat
 
 def _render_input_data_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.header("PDF 기반 입력 데이터")
-    st.info("PDF 표는 국가·권역별 탄소배출계수를 제공합니다. 재질별 생산가능 국가는 3번 탭의 체크박스에서 독립적으로 제한합니다.")
+    st.info("PDF 표의 국가·권역별 생산·운송계수와 사용자 입력의 배터리 질량기반 제조조립계수를 사용합니다. 재질별 생산가능 국가는 3번 탭에서 독립적으로 제한합니다.")
     display_names = {
         "products.csv": "제품 6종", "demand.csv": "프랑스 수요",
         "raw_material_suppliers.csv": "재질별 국가 생산계수·비용",
-        "assembly_locations.csv": "국가별 조립계수·비용",
+        "assembly_locations.csv": "비배터리 차량 조립 및 배터리 제조조립 계수",
         "transport_parameters.csv": "운송수단·지역별 계수",
         "country_transport_rules.csv": "국가별 허용 운송수단",
         "material_parameters.csv": "재질 손실률", "markets.csv": "수요지",
@@ -4104,7 +4266,7 @@ def run_app():
     st.set_page_config(page_title="PDF 기반 전기차 공급망 Route LP", page_icon="🚗", layout="wide")
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
-    st.caption("build: pdf-country-route-product-cap-score-search-v8.9 · 트림별 탄소상한 · 80→5점 탐색 · 재질별 국가선택 · 공급망 비용 최소화")
+    st.caption("build: pdf-country-route-fixed-score-battery-parity-v8.10 · S2=60/S3=65/S4=70 고정상한 · 배터리 제조조립 대칭 적용")
 
     defaults = load_default_tables()
     with st.sidebar:
@@ -4138,12 +4300,11 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
-        st.info("정책 시나리오는 80점부터 5점씩 낮추며, 여섯 차량 트림 모두가 자신의 개별 탄소상한을 만족하는 비용 최소 OPTIMAL 해를 찾습니다. 회사 총배출량은 결과 지표일 뿐 하나의 합산 상한 제약이 아닙니다.")
+        st.info("각 시나리오의 고정점수(S2 60점, S3 65점, S4 70점)에서 여섯 차량 트림의 개별 탄소상한을 적용하고 공급망 비용 최소 OPTIMAL 해를 계산합니다. 점수를 자동으로 낮추지 않습니다.")
         c1, c2, c3 = st.columns(3)
-        scenario_id = c1.selectbox("시나리오", ["S1", "S2", "S3"], format_func=lambda x: str(tables["scenarios.csv"].set_index("scenario_id").loc[x, "scenario_name"]))
+        scenario_id = c1.selectbox("시나리오", ["S1", "S2", "S3", "S4"], format_func=lambda x: str(tables["scenarios.csv"].set_index("scenario_id").loc[x, "scenario_name"]))
         production_mode = c2.selectbox("생산 방식", ["line", "modular"], format_func=lambda x: MODE_LABEL[x])
-        time_limit = c3.number_input("각 점수별 Solver 제한시간(초)", min_value=10, max_value=600, value=180, step=10)
-        st.metric("정책점수 탐색 순서", "80 → 75 → 70 → … → 0")
+        time_limit = c3.number_input("Solver 제한시간(초)", min_value=10, max_value=600, value=180, step=10)
 
         selected_country_map = render_country_selection_by_material(
             tables["raw_material_suppliers.csv"], tables["assembly_locations.csv"]
@@ -4153,11 +4314,24 @@ def run_app():
             st.error("철강·알루미늄·기타 원자재·배터리·조립 각각에 최소 1개 국가를 선택해야 합니다.")
 
         def execute_case(s: str, mode: str, status_box, progress=None, prefix: str = "") -> Dict:
-            return solve_with_score_search(
-                tables, s, mode, int(time_limit), selected_country_map=selected_country_map,
-                start_score=80.0, score_step=5.0, minimum_search_score=0.0,
-                progress_callback=_make_score_progress_callback(status_box, progress, prefix),
+            scenario_row = tables["scenarios.csv"].set_index("scenario_id").loc[s]
+            score = float(scenario_row.get("minimum_score", 0.0))
+            if int(scenario_row.get("apply_carbon_cap", 0)) == 1:
+                status_box.info(f"{prefix}{score:.0f}점의 트림별 탄소상한에서 비용 최소 공급망을 계산 중입니다.")
+            else:
+                status_box.info(f"{prefix}탄소상한 없는 회사 baseline 공급망을 계산 중입니다.")
+            if progress is not None:
+                progress.progress(0.15)
+            result = solve_case(
+                tables, s, mode, int(time_limit), selected_country_map=selected_country_map
             )
+            if progress is not None:
+                progress.progress(1.0)
+            if result.get("status") == "OPTIMAL":
+                status_box.success(f"{prefix}고정 시나리오에서 비용 최소 OPTIMAL 해를 찾았습니다.")
+            elif result.get("status") == "INFEASIBLE":
+                status_box.error(f"{prefix}{score:.0f}점 고정 상한에서는 feasible 공급망이 없습니다.")
+            return result
 
         b1, b2 = st.columns(2)
         with b1:
@@ -4168,27 +4342,27 @@ def run_app():
                     st.session_state.setdefault("xpress_results", {})[(scenario_id, production_mode)] = res
                     st.session_state.pop("results_zip_bytes", None); gc.collect()
                     if res.get("status") == "OPTIMAL":
-                        score = res.get("highest_feasible_score")
-                        suffix = "" if score is None or not np.isfinite(float(score)) else f" · 최고 feasible {float(score):.0f}점"
+                        score = res.get("applied_policy_score")
+                        suffix = " · 상한 없음" if score is None or not np.isfinite(float(score)) else f" · 고정 {float(score):.0f}점"
                         st.success(f"OPTIMAL · 공급망 비용 €{float(res.get('objective_value', 0.0)):,.0f}{suffix}")
                     else:
                         st.error(f"{res.get('status')}: {res.get('message')}")
                 except Exception as exc:
                     st.exception(exc)
         with b2:
-            if st.button("6개 시나리오×생산방식 순차 실행", use_container_width=True, disabled=not selection_valid):
+            if st.button("8개 시나리오×생산방식 순차 실행", use_container_width=True, disabled=not selection_valid):
                 overall = st.progress(0.0); box = st.empty()
                 all_results = st.session_state.setdefault("xpress_results", {})
-                cases = [(s, m) for s in ["S1", "S2", "S3"] for m in ["line", "modular"]]
+                cases = [(s, m) for s in ["S1", "S2", "S3", "S4"] for m in ["line", "modular"]]
                 for i, (s, m) in enumerate(cases, start=1):
-                    prefix = f"[{i}/6] {SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: "
+                    prefix = f"[{i}/8] {SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: "
                     try:
                         all_results[(s, m)] = execute_case(s, m, box, None, prefix)
                     except Exception as exc:
                         all_results[(s, m)] = {"status": "ERROR", "message": str(exc), "scenario_id": s, "production_mode": m}
                     overall.progress(i / len(cases)); gc.collect()
                 st.session_state.pop("results_zip_bytes", None)
-                box.success("6개 조합 계산이 완료되었습니다.")
+                box.success("8개 조합 계산이 완료되었습니다.")
 
         st.markdown("### 고정 점수 민감도")
         with st.expander("선택 생산방식의 고정 점수별 비용·배출량 계산", expanded=False):
@@ -4223,7 +4397,7 @@ def run_app():
         if not results:
             st.info("3번 탭에서 최적화를 실행하세요.")
         else:
-            for scenario in ["S1", "S2", "S3"]:
+            for scenario in ["S1", "S2", "S3", "S4"]:
                 render_poster_scenario(results, scenario); st.divider()
 
             st.markdown("### 분석 및 결론")
@@ -4235,7 +4409,7 @@ def run_app():
                 a, b = st.columns(2)
                 with a: st.markdown("##### 라인 생산"); st.bar_chart(ratio_df.set_index("scenario_name")[["line_cost"]])
                 with b: st.markdown("##### 모듈 분산 생산"); st.bar_chart(ratio_df.set_index("scenario_name")[["modular_cost"]])
-                show_explained_dataframe(ratio_df, "비용 비교", "각 행은 하나의 시나리오입니다.", value_meaning="비용은 보조금 손실이 없는 순수 공급망 최적비용입니다. score 열은 최고 feasible 점수입니다.")
+                show_explained_dataframe(ratio_df, "비용 비교", "각 행은 하나의 시나리오입니다.", value_meaning="비용은 순수 공급망 최적비용이며 score 열은 각 시나리오에 고정된 정책점수입니다.")
             if not emission_df.empty:
                 st.markdown("#### 생산방식별 회사 총탄소배출량")
                 a, b = st.columns(2)
@@ -4257,7 +4431,7 @@ def run_app():
             if valid_results:
                 st.markdown("### 계산된 모든 공급망 지도")
                 render_map_legend_outside()
-                ordered = [k for k in [(s,m) for s in ["S1","S2","S3"] for m in ["line","modular"]] if k in valid_results]
+                ordered = [k for k in [(s,m) for s in ["S1","S2","S3","S4"] for m in ["line","modular"]] if k in valid_results]
                 for i in range(0, len(ordered), 2):
                     cols = st.columns(2)
                     for col, key in zip(cols, ordered[i:i+2]):
@@ -4266,10 +4440,10 @@ def run_app():
                             render_result_map(valid_results[key], f"map_{key[0]}_{key[1]}", height=560)
                 st.caption("파란 원은 재질·배터리/모듈 공급위치, 초록 원은 차량·팩 조립위치, 주황 아이콘은 프랑스 시장입니다.")
 
-                if st.button("전체 결과 ZIP 생성", key="v89_results_zip"):
+                if st.button("전체 결과 ZIP 생성", key="v810_results_zip"):
                     st.session_state["results_zip_bytes"] = _results_zip_v88(valid_results)
                 if isinstance(st.session_state.get("results_zip_bytes"), (bytes, bytearray)):
-                    st.download_button("전체 결과 ZIP 다운로드", st.session_state["results_zip_bytes"], file_name="v89_results.zip", mime="application/zip")
+                    st.download_button("전체 결과 ZIP 다운로드", st.session_state["results_zip_bytes"], file_name="v810_results.zip", mime="application/zip")
 
             sensitivity = st.session_state.get("score_sensitivity")
             if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
@@ -4292,15 +4466,15 @@ def run_app():
                 st.markdown("### 상세 결과")
                 chosen = st.selectbox("상세 조회 조합", available, format_func=lambda k: f"{SCENARIO_SHORT[k[0]]} · {MODE_LABEL[k[1]]}")
                 selected = results[chosen]
-                subtabs = st.tabs(["차량별 결과", "공급지 생산량", "부품 경로", "조립지", "완제품 경로", "점수탐색", "Solver 정보"])
-                frames = [selected.get("product_summary"), selected.get("supplier_summary"), selected.get("raw_routes"), selected.get("plant_summary"), selected.get("finished_routes"), selected.get("score_search_history")]
-                names = ["차량별 결과", "공급지 생산량", "부품 경로", "조립지", "완제품 경로", "점수탐색 이력"]
-                for tab, frame, name in zip(subtabs[:6], frames, names):
+                subtabs = st.tabs(["차량별 결과", "공급지 생산량", "부품 경로", "차량 조립지", "완제품 경로", "Solver 정보"])
+                frames = [selected.get("product_summary"), selected.get("supplier_summary"), selected.get("raw_routes"), selected.get("plant_summary"), selected.get("finished_routes")]
+                names = ["차량별 결과", "공급지 생산량", "부품 경로", "비배터리 차체·차량 조립지", "완제품 경로"]
+                for tab, frame, name in zip(subtabs[:5], frames, names):
                     with tab:
                         if isinstance(frame, pd.DataFrame):
-                            show_explained_dataframe(frame, name, "각 행은 해당 인덱스 조합의 양의 결과 또는 탐색 시도입니다.", value_meaning="열 이름과 값은 해당 조합의 물량·비용·배출량·상태를 나타냅니다.")
-                with subtabs[6]:
-                    st.json({k:selected.get(k) for k in ["status","solver_name","solver_version","solver_iterations","variable_count","constraint_count","matrix_nonzeros","wall_time_sec","highest_feasible_score","scenario_minimum_score","subsidy_eligible"]})
+                            show_explained_dataframe(frame, name, "각 행은 해당 인덱스 조합의 양의 최적화 결과입니다.", value_meaning="열 이름과 값은 물량·비용·배출량·국가를 나타냅니다.")
+                with subtabs[5]:
+                    st.json({k:selected.get(k) for k in ["status","solver_name","solver_version","solver_iterations","variable_count","constraint_count","matrix_nonzeros","wall_time_sec","applied_policy_score","all_product_caps_met","objective_reconstruction_gap_eur"]})
 
     with tabs[4]:
         render_math_model_tab_v89(tables)
