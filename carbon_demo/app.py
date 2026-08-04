@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-lp-memory-safe-v8.0"
-APP_PACKAGE_ID = "20260804-pdf-route-v8"
+APP_BUILD = "pdf-country-route-lp-memory-safe-v8.2"
+APP_PACKAGE_ID = "20260804-pdf-route-v8.2"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -1011,7 +1011,11 @@ def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None
         solver.set_time_limit(milliseconds)
 
 
-def solve_lp_model(model: LPModel, time_limit_sec: int = 180) -> SolveResult:
+def solve_lp_model(
+    model: LPModel,
+    time_limit_sec: int = 180,
+    objective_override: Optional[np.ndarray] = None,
+) -> SolveResult:
     started = time.perf_counter()
     solver, solver_name = _create_ortools_lp_solver()
     _set_solver_time_limit(solver, time_limit_sec)
@@ -1027,9 +1031,10 @@ def solve_lp_model(model: LPModel, time_limit_sec: int = 180) -> SolveResult:
         upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
         variables.append(solver.NumVar(lower, upper, ""))
 
+    coefficients = model.c if objective_override is None else np.asarray(objective_override, dtype=float)
     objective = solver.Objective()
-    for idx in np.flatnonzero(model.c):
-        objective.SetCoefficient(variables[int(idx)], float(model.c[int(idx)]))
+    for idx in np.flatnonzero(coefficients):
+        objective.SetCoefficient(variables[int(idx)], float(coefficients[int(idx)]))
     objective.SetMinimization()
 
     rows = model.rows
@@ -1107,6 +1112,107 @@ def solve_lp_model(model: LPModel, time_limit_sec: int = 180) -> SolveResult:
         solver_version=solver_version,
         iterations=iterations,
     )
+
+
+def total_emission_objective(model: LPModel) -> np.ndarray:
+    obj = np.zeros(model.layout.n_vars, dtype=float)
+    obj[model.layout.off_rp:model.layout.off_rt] = model.emission_rp
+    obj[model.layout.off_rt:model.layout.off_fp] = model.emission_rt
+    obj[model.layout.off_fp:model.layout.off_ft] = model.emission_fp
+    obj[model.layout.off_ft:model.layout.off_z1] = model.emission_ft
+    return obj
+
+
+def diagnose_carbon_cap_infeasibility(
+    tables: Mapping[str, pd.DataFrame],
+    scenario_id: str,
+    production_mode: str,
+    cap_application: str,
+    time_limit_sec: int = 90,
+) -> Optional[Dict]:
+    scenarios = tables["scenarios.csv"]
+    target_rows = scenarios[scenarios["scenario_id"] == scenario_id]
+    if target_rows.empty:
+        return None
+    target = target_rows.iloc[0]
+    if int(target.get("apply_carbon_cap", 0)) != 1:
+        return None
+
+    tmp_tables = dict(tables)
+    tmp_scenarios = scenarios.copy()
+    tmp_scenarios.loc[tmp_scenarios["scenario_id"] == scenario_id, "apply_carbon_cap"] = 0
+    tmp_tables["scenarios.csv"] = tmp_scenarios
+
+    model: Optional[LPModel] = None
+    result: Optional[SolveResult] = None
+    try:
+        model = build_pdf_route_lp_model(
+            tmp_tables,
+            production_mode=production_mode,
+            scenario_id=scenario_id,
+            cap_application=cap_application,
+        )
+        result = solve_lp_model(
+            model,
+            time_limit_sec=min(max(int(time_limit_sec), 20), 120),
+            objective_override=total_emission_objective(model),
+        )
+        if result.status not in {"OPTIMAL", "FEASIBLE"}:
+            return {
+                "status": result.status,
+                "message": "탄소상한을 제거한 최소배출 진단 문제도 해를 찾지 못했습니다.",
+            }
+
+        diag_solution = extract_solution(result)
+        product_df = diag_solution.get("product_summary", pd.DataFrame()).copy()
+        if product_df.empty:
+            return {
+                "status": "NO_PRODUCT_SUMMARY",
+                "message": "최소배출 진단 결과에서 제품별 요약을 만들지 못했습니다.",
+            }
+
+        product_df = product_df[[
+            "product_id", "product_name", "vehicle_class", "demand_units",
+            "emissions_per_vehicle_kgco2", "subsidy_score"
+        ]].copy()
+        product_df["scenario_cap_kgco2_per_vehicle"] = product_df["vehicle_class"].map(
+            lambda cls: float(target["small_cap_kgco2_per_vehicle"]) if cls == "small"
+            else float(target["standard_cap_kgco2_per_vehicle"])
+        )
+        product_df["slack_kgco2_per_vehicle"] = (
+            product_df["scenario_cap_kgco2_per_vehicle"] - product_df["emissions_per_vehicle_kgco2"]
+        )
+        product_df["cap_satisfied"] = product_df["slack_kgco2_per_vehicle"] >= -1e-6
+
+        class_rows: List[Dict] = []
+        for vehicle_class, grp in product_df.groupby("vehicle_class"):
+            class_rows.append({
+                "vehicle_class": vehicle_class,
+                "minimum_weighted_avg_emissions_kgco2_per_vehicle": (
+                    float((grp["emissions_per_vehicle_kgco2"] * grp["demand_units"]).sum())
+                    / max(float(grp["demand_units"].sum()), 1.0)
+                ),
+                "scenario_cap_kgco2_per_vehicle": float(target["small_cap_kgco2_per_vehicle"]) if vehicle_class == "small"
+                else float(target["standard_cap_kgco2_per_vehicle"]),
+            })
+        class_df = pd.DataFrame(class_rows)
+        class_df["slack_kgco2_per_vehicle"] = (
+            class_df["scenario_cap_kgco2_per_vehicle"]
+            - class_df["minimum_weighted_avg_emissions_kgco2_per_vehicle"]
+        )
+        class_df["average_cap_satisfied"] = class_df["slack_kgco2_per_vehicle"] >= -1e-6
+
+        return {
+            "status": "DIAGNOSED",
+            "message": "탄소상한을 제거하고 총배출량 최소화로 다시 풀어 산출한 이론적 최소배출 진단입니다.",
+            "product_minimum_emissions": product_df,
+            "class_average_minimum_emissions": class_df,
+        }
+    finally:
+        if result is not None:
+            result.x = None
+        _release_model_memory(model)
+        gc.collect()
 
 
 # -----------------------------------------------------------------------------
@@ -1427,6 +1533,22 @@ def solve_case(
         )
         result = solve_lp_model(model, time_limit_sec=time_limit_sec)
         compact = extract_solution(result)
+        if result.status == "INFEASIBLE" and score_override is None:
+            try:
+                diagnosis = diagnose_carbon_cap_infeasibility(
+                    tables,
+                    scenario_id=scenario_id,
+                    production_mode=production_mode,
+                    cap_application=cap_application,
+                    time_limit_sec=min(max(int(time_limit_sec // 2), 30), 90),
+                )
+                if diagnosis:
+                    compact["feasibility_diagnosis"] = diagnosis
+            except Exception as exc:
+                compact["feasibility_diagnosis"] = {
+                    "status": "DIAGNOSTIC_ERROR",
+                    "message": f"진단 계산 중 오류: {exc}",
+                }
         # The session stores only compact summaries/nonzero routes, never the
         # 119,376-value solution vector or LP coefficient arrays.
         return compact
@@ -1473,7 +1595,53 @@ def results_zip(results: Mapping[Tuple[str, str], Dict]) -> bytes:
 # -----------------------------------------------------------------------------
 # Mapping and charts
 # -----------------------------------------------------------------------------
-def build_supply_map(result: Dict, height: int = 480):
+def _bezier_curve_points(start: Tuple[float, float], end: Tuple[float, float], bend: float, steps: int = 30):
+    lat1, lon1 = float(start[0]), float(start[1])
+    lat2, lon2 = float(end[0]), float(end[1])
+    dx = lon2 - lon1
+    dy = lat2 - lat1
+    length = max(math.hypot(dx, dy), 1e-9)
+    mid_lon = (lon1 + lon2) / 2.0
+    mid_lat = (lat1 + lat2) / 2.0
+    norm_x = -dy / length
+    norm_y = dx / length
+    control_lon = mid_lon + norm_x * bend * length
+    control_lat = mid_lat + norm_y * bend * length
+    points = []
+    for i in range(steps + 1):
+        t = i / steps
+        lon = (1 - t) ** 2 * lon1 + 2 * (1 - t) * t * control_lon + t ** 2 * lon2
+        lat = (1 - t) ** 2 * lat1 + 2 * (1 - t) * t * control_lat + t ** 2 * lat2
+        points.append((lat, lon))
+    return points
+
+
+def _route_bend(route_kind: str, transport_mode_index: int, material_id: str, supplier_index: int, plant_index: int) -> float:
+    base_by_mode = {1: -0.08, 2: 0.08, 3: -0.16, 4: 0.16, 5: -0.24, 6: 0.24}
+    material_adjust = {"steel": -0.02, "aluminum": 0.02, "other": -0.04, "battery": 0.04, "finished": 0.0}
+    sign = 1.0 if ((supplier_index + plant_index) % 2 == 0) else -1.0
+    base = base_by_mode.get(int(transport_mode_index), 0.1)
+    if route_kind == "final":
+        base = 0.6 * base
+        sign = 1.0 if (plant_index % 2 == 0) else -1.0
+        material_id = "finished"
+    return sign * (base + material_adjust.get(str(material_id), 0.0))
+
+
+def _add_route_label(supply_map, location: Tuple[float, float], transport_label: str, quartile: Optional[str] = None):
+    label_text = transport_label if quartile is None else f"{transport_label} · {quartile}"
+    html = f"""
+    <div style="background: rgba(255,255,255,0.92); border: 1px solid #666; border-radius: 4px;
+                padding: 1px 4px; font-size: 10px; white-space: nowrap; color: #222;">{label_text}</div>
+    """
+    import folium
+    folium.Marker(
+        location,
+        icon=folium.DivIcon(html=html, icon_size=(140, 16), icon_anchor=(40, 8)),
+    ).add_to(supply_map)
+
+
+def build_supply_map(result: Dict, height: int = 620):
     # Heavy visualization libraries are imported only when the user asks for
     # one map. This materially lowers idle-process memory.
     import folium
@@ -1519,55 +1687,75 @@ def build_supply_map(result: Dict, height: int = 480):
         icon=folium.Icon(color="orange", icon="shopping-cart", prefix="fa"),
     ).add_to(supply_map)
 
-    width_by_quartile = {"Q1": 1.5, "Q2": 2.5, "Q3": 4.0, "Q4": 6.0}
+    width_by_quartile = {"Q1": 2.5, "Q2": 5.0, "Q3": 8.0, "Q4": 11.0}
     if not route_df.empty:
         for _, row in route_df.iterrows():
             s = plants.iloc[int(row["supplier_index"]) - 1]
             p = plants.iloc[int(row["plant_index"]) - 1]
             material = str(row["material_id"])
             t = int(row["transport_mode_index"])
+            quartile = str(row.get("quartile", ""))
+            curve = _bezier_curve_points(
+                (float(s["latitude"]), float(s["longitude"])),
+                (float(p["latitude"]), float(p["longitude"])),
+                _route_bend("raw", t, material, int(row["supplier_index"]), int(row["plant_index"])),
+                steps=28,
+            )
             folium.PolyLine(
-                [(s["latitude"], s["longitude"]), (p["latitude"], p["longitude"])],
+                curve,
                 color=MATERIAL_COLOR.get(material, "#555555"),
-                weight=width_by_quartile.get(str(row["quartile"]), 2.0),
-                opacity=0.78,
+                weight=width_by_quartile.get(quartile, 4.0),
+                opacity=0.82,
                 dash_array=TRANSPORT_DASH.get(t),
                 tooltip=(
                     f"{row['material_name']} | {row['supplier_location']} → {row['plant_location']} | "
-                    f"{row['transport_mode_ko']} | {row['flow_amount']:,.1f} | {row['quartile']}"
+                    f"{row['transport_mode_ko']} | {row['flow_amount']:,.1f} | {quartile}"
                 ),
             ).add_to(supply_map)
+            _add_route_label(supply_map, curve[len(curve)//2], str(row["transport_mode_ko"]), quartile)
 
     if not final_df.empty:
         final_agg = final_df.groupby(
             ["plant_index", "plant_location", "transport_mode_index", "transport_mode_ko"], as_index=False
         )["vehicle_equivalents"].sum()
-        max_units = max(float(final_agg["vehicle_equivalents"].max()), 1.0)
+        final_agg = assign_flow_quartiles(final_agg, "vehicle_equivalents")
         for _, row in final_agg.iterrows():
             p = plants.iloc[int(row["plant_index"]) - 1]
-            weight = 1.5 + 4.5 * float(row["vehicle_equivalents"]) / max_units
+            quartile = str(row.get("quartile", ""))
+            curve = _bezier_curve_points(
+                (float(p["latitude"]), float(p["longitude"])),
+                (market_lat, market_lon),
+                _route_bend("final", int(row["transport_mode_index"]), "finished", int(row["plant_index"]), 999),
+                steps=24,
+            )
             folium.PolyLine(
-                [(p["latitude"], p["longitude"]), (market_lat, market_lon)],
+                curve,
                 color=MATERIAL_COLOR["finished"],
-                weight=weight,
-                opacity=0.65,
-                dash_array="6,5",
+                weight=width_by_quartile.get(quartile, 4.0),
+                opacity=0.72,
+                dash_array=TRANSPORT_DASH.get(int(row["transport_mode_index"])),
                 tooltip=(
                     f"완제품 | {row['plant_location']} → 프랑스 | {row['transport_mode_ko']} | "
-                    f"{row['vehicle_equivalents']:,.1f}대 등가량"
+                    f"{row['vehicle_equivalents']:,.1f}대 등가량 | {quartile}"
                 ),
             ).add_to(supply_map)
+            _add_route_label(supply_map, curve[len(curve)//2], str(row["transport_mode_ko"]), quartile)
 
     legend = """
     <div style="position: fixed; bottom: 24px; left: 24px; z-index:9999; background:white;
-                border:1px solid #777; border-radius:6px; padding:8px 10px; font-size:12px;">
-      <b>부품 공급망</b><br>
+                border:1px solid #777; border-radius:6px; padding:8px 10px; font-size:12px; line-height:1.45;">
+      <b>부품/완제품 공급망 지도 범례</b><br>
       <span style="color:#e41a1c">━</span> 철강 &nbsp;
-      <span style="color:#ff9f1c">━</span> 알루미늄<br>
+      <span style="color:#ff9f1c">━</span> 알루미늄 &nbsp;
       <span style="color:#238b45">━</span> 기타 원자재 &nbsp;
-      <span style="color:#2171b5">━</span> 배터리<br>
-      <span style="color:#6a3d9a">┄</span> 완제품<br>
-      선 굵기: Q1 &lt; Q2 &lt; Q3 &lt; Q4
+      <span style="color:#2171b5">━</span> 배터리 &nbsp;
+      <span style="color:#6a3d9a">━</span> 완제품<br>
+      <span style="display:inline-block; width:30px; border-top:3px solid #555;"></span> 도로 &nbsp;
+      <span style="display:inline-block; width:30px; border-top:3px dashed #555;"></span> 철도 &nbsp;
+      <span style="display:inline-block; width:30px; border-top:3px dashed #555;"></span> 해상+육상 &nbsp;
+      <span style="display:inline-block; width:30px; border-top:3px dotted #555;"></span> 항공+육상<br>
+      선 굵기: Q1(가장 얇음) &lt; Q2 &lt; Q3 &lt; Q4(가장 굵음)<br>
+      곡선 라벨: 운송수단 종류 · 사분위수
     </div>
     """
     supply_map.get_root().html.add_child(folium.Element(legend))
@@ -1607,7 +1795,7 @@ def quartile_comparison_table(results: Mapping[Tuple[str, str], Dict], scenario_
 # -----------------------------------------------------------------------------
 # Streamlit UI
 # -----------------------------------------------------------------------------
-def render_result_map(result: Dict, key: str, height: int = 430):
+def render_result_map(result: Dict, key: str, height: int = 620):
     if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
         st.warning(f"{result.get('status')}: {result.get('message')}")
         return
@@ -1623,6 +1811,22 @@ def render_solver_metrics(result: Dict):
     status = str(result.get("status", "NOT_RUN"))
     if status not in {"OPTIMAL", "FEASIBLE"}:
         st.error(f"{status}: {result.get('message', '해를 찾지 못했습니다.')}")
+        diagnosis = result.get("feasibility_diagnosis")
+        if isinstance(diagnosis, dict) and diagnosis.get("status") == "DIAGNOSED":
+            st.caption(
+                "현재 PDF 기반 국가별 생산·운송 배출계수와 손실률을 그대로 두면, "
+                "시나리오 탄소상한을 만족하는 해가 존재하지 않을 수 있습니다. "
+                "아래 표는 탄소상한을 제거한 뒤 총배출량을 최소화했을 때의 이론적 최저 배출량입니다."
+            )
+            with st.expander("왜 INFEASIBLE 인지 보기", expanded=False):
+                st.markdown("**차종별 최소 평균배출량 vs 시나리오 상한**")
+                class_df = diagnosis.get("class_average_minimum_emissions")
+                if isinstance(class_df, pd.DataFrame):
+                    st.dataframe(class_df, hide_index=True, use_container_width=True)
+                st.markdown("**트림별 최소 배출량 vs 시나리오 상한**")
+                product_df = diagnosis.get("product_minimum_emissions")
+                if isinstance(product_df, pd.DataFrame):
+                    st.dataframe(product_df, hide_index=True, use_container_width=True)
         return
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("총비용", f"€{float(result['objective_value']):,.0f}")
@@ -1657,6 +1861,69 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
     if line.get("objective_value") and modular.get("objective_value"):
         ratio = modular["objective_value"] / line["objective_value"]
         st.caption(f"모듈/라인 총비용 비율: {ratio:.6f}")
+
+
+def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
+    st.header("이 SaaS가 하는 일")
+    st.markdown(
+        """
+이 앱은 **프랑스 전기차 보조금 탄소기준**과 **공급망 최적화**를 함께 다루는
+**탄소·비용 기반 공급망 의사결정 SaaS 프로토타입**입니다.
+
+사용자는 제품, 수요, 공급지, 조립지, 국가별 허용 운송수단, PDF 기반 배출계수, 시나리오를 입력하고,
+앱은 **라인 생산 방식**과 **모듈 활용 분산 생산 방식**에 대해 총비용과 총탄소배출량을 최소화하는 공급망 구조를 계산합니다.
+        """
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 1) 입력 데이터")
+        input_df = pd.DataFrame([
+            ["제품 정보", "전기차 6종의 질량, 배터리 용량, 차급"],
+            ["수요 정보", "프랑스 시장의 제품별 수요"],
+            ["공급지 정보", "국가별 생산비, 생산배출계수, 생산용량"],
+            ["조립지 정보", "국가별 조립비, 조립배출계수"],
+            ["운송 정보", "국가별 허용 운송수단과 운송계수"],
+            ["시나리오", "현행 기준 / 기준 없음 / 강화 기준"],
+        ], columns=["입력 항목", "설명"])
+        st.dataframe(input_df, hide_index=True, use_container_width=True)
+    with c2:
+        st.markdown("### 2) 주요 출력")
+        output_df = pd.DataFrame([
+            ["총비용", "생산·운송·조립 비용의 총합"],
+            ["총탄소배출량", "생산·운송·조립 배출량의 총합"],
+            ["공급망 구조", "공급지 → 조립지 → 프랑스 시장 흐름"],
+            ["차량별 결과", "제품별 kg CO₂-eq/대, 보조금 점수, 상한 만족 여부"],
+            ["지도 시각화", "운송수단·Q1~Q4 흐름 굵기·공급망 곡선"],
+            ["포스터형 비교", "시나리오별 라인 생산 vs 모듈 분산 생산 비교"],
+        ], columns=["출력 항목", "설명"])
+        st.dataframe(output_df, hide_index=True, use_container_width=True)
+
+    st.markdown("### 3) 최적화 프레임워크 큰틀")
+    framework_df = pd.DataFrame([
+        [1, "데이터 불러오기", "CSV 기반 제품·수요·공급지·조립지·운송·시나리오 데이터를 읽습니다."],
+        [2, "허용 경로 생성", "국가별 운송수단 가용성과 거리행렬로 복합운송 경로를 구성합니다."],
+        [3, "LP 모형 구성", "목적함수, 물량수지, 수요충족, 용량, 탄소상한 제약을 구성합니다."],
+        [4, "최적화 계산", "OR-Tools 연속 LP로 비용 최소 공급망을 계산합니다."],
+        [5, "시나리오 평가", "탄소상한 만족 여부, 비용, 배출량, 제품별 지표를 계산합니다."],
+        [6, "결과 시각화", "포스터형 결과, 상세 표, 공급망 지도, 포스터 비교를 제공합니다."],
+    ], columns=["단계", "모듈", "구체적 역할"])
+    st.dataframe(framework_df, hide_index=True, use_container_width=True)
+
+    st.markdown("### 4) 현재 앱에서 최적화하는 의사결정")
+    decision_df = pd.DataFrame([
+        ["RP", "각 재질을 어느 공급지에서 얼마나 생산할 것인가"],
+        ["RT", "각 재질을 어느 공급지에서 어느 조립지로 어떤 운송경로로 얼마나 보낼 것인가"],
+        ["FP", "각 조립지에서 제품을 얼마나 생산할 것인가"],
+        ["FT", "완제품을 어느 조립지에서 프랑스 시장으로 어떤 운송경로로 얼마나 보낼 것인가"],
+        ["ZM/ZS/ZL", "생산방식에 따른 배터리 모듈/팩 구조를 어떻게 충족할 것인가"],
+    ], columns=["변수", "사용자 관점의 의미"])
+    st.dataframe(decision_df, hide_index=True, use_container_width=True)
+
+    st.info(
+        "이 앱은 운송수단을 확률적으로 추첨하지 않습니다. 국가별로 허용된 여러 운송경로에 대해 LP가 연속 물량을 직접 배분합니다. "
+        "즉, 운송수단 선택은 랜덤 선택이 아니라 비용·탄소·제약을 고려한 최적 물량 배분입니다."
+    )
 
 
 def run_app():
@@ -1703,14 +1970,18 @@ def run_app():
         st.stop()
 
     tabs = st.tabs([
-        "1. PDF·경로 입력 데이터",
-        "2. 최적화 실행",
-        "3. 포스터형 최적화 결과",
-        "4. 포스터 기준 비교",
+        "1. SaaS·최적화 프레임워크 개요",
+        "2. PDF·경로 입력 데이터",
+        "3. 최적화 실행",
+        "4. 포스터형 최적화 결과",
         "5. 수학모형·코드 매핑",
+        "6. 포스터 기준 비교",
     ])
 
     with tabs[0]:
+        render_overview_tab(tables)
+
+    with tabs[1]:
         st.header("PDF 기반 탄소계수 및 국가별 운송경로 입력 데이터")
         st.info(
             "공급지와 조립지 후보는 기존 24개 위치를 유지합니다. 국가별 허용수단은 country_transport_rules.csv에서 여러 개를 동시에 허용할 수 있으며, 운송수단별 물량은 최적화변수 RT·FT로 결정됩니다."
@@ -1732,7 +2003,7 @@ def run_app():
             with sub:
                 st.dataframe(tables[filename], use_container_width=True, hide_index=True)
 
-    with tabs[1]:
+    with tabs[2]:
         st.header("최적화 실행")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1828,7 +2099,7 @@ def run_app():
                     p.progress(i / len(scores))
                 st.session_state["score_sensitivity"] = pd.DataFrame(rows)
 
-    with tabs[2]:
+    with tabs[3]:
         st.header("포스터형 최적화 결과")
         results = st.session_state.get("xpress_results", {})
         if not results:
@@ -1864,7 +2135,7 @@ def run_app():
                     render_result_map(
                         valid_results[map_choice],
                         f"lazy_map_{map_choice[0]}_{map_choice[1]}",
-                        height=470,
+                        height=650,
                     )
 
                 st.markdown("### 결과 파일")
@@ -1925,7 +2196,106 @@ def run_app():
                         "wall_time_sec": selected.get("wall_time_sec"),
                     })
 
-    with tabs[3]:
+    with tabs[4]:
+        st.header("수학모형과 코드의 대응")
+        st.info("이 5번 탭은 현재 구현된 수학적 모형과 코드 구현이 업데이트될 때마다 함께 수정되는 공식 설명 영역입니다.")
+
+        st.markdown("### 5.1 목적함수")
+        st.latex(r"""
+        \min Z=
+        \sum_{f,r,s} c^{RP}_{rs}RP_{frs}
+        +\sum_{f,r,s,p,k}c^{RT}_{spk}RT_{frspk}
+        +\sum_{f,p}c^{FP}_{fp}FP_{fp}
+        +\sum_{f,p,k}c^{FT}_{pk}FT_{fpk}
+        """)
+        st.markdown("원자재·배터리 생산비, 부품 운송비, 조립비, 완제품 운송비의 총합을 최소화합니다.")
+
+        st.markdown("### 5.2 변수 정의역과 허용 경로")
+        st.latex(r"RP,RT,FP,FT,ZM,ZS,ZL\ge 0")
+        st.latex(r"RT_{frspk}=0\;\text{if }A^{raw}_{spk}=0,\qquad FT_{fpk}=0\;\text{if }A^{fin}_{pk}=0")
+        st.markdown("모든 변수는 연속변수이며, 허용되지 않은 운송경로는 상한을 0으로 두어 자동으로 사용되지 않게 합니다.")
+
+        st.markdown("### 5.3 수요 충족과 물량 보존")
+        st.latex(r"\sum_{p,k}FT_{fpk}=D_f")
+        st.latex(r"FP_{fp}=\sum_k FT_{fpk}")
+        st.latex(r"RP_{frs}=\sum_{p,k}RT_{frspk}")
+        st.latex(r"\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp}\qquad (r\in\{steel,aluminum,other\})")
+        st.markdown("프랑스 수요는 등식으로 정확히 충족하며, 공급지 생산량=출고량, 조립지 유입량=필요량, 조립량=완제품 출하량의 구조를 강제합니다.")
+
+        st.markdown("### 5.4 배터리 관련 생산방식 제약")
+        st.markdown("**라인 생산 방식**")
+        st.latex(r"\sum_k RT_{f,bat,spk}=B_f ZL_{fsp}")
+        st.latex(r"\sum_s ZL_{fsp}=FP_{fp}")
+        st.markdown(r"배터리 팩 전체를 한 번에 공급받는 구조입니다. 여기서 \(B_f\)는 차량 \(f\)의 배터리 용량(kWh)입니다.")
+        st.markdown("**모듈 활용 분산 생산 방식**")
+        st.latex(r"\sum_k RT_{f,bat,spk}=10\,ZM_{fsp}+5\,ZS_{fsp}")
+        st.latex(r"\sum_{s,k}RT_{f,bat,spk}=B_f FP_{fp}")
+        st.markdown("10kWh 메인 모듈과 5kWh 보조 모듈의 조합으로 배터리를 충족하는 구조입니다.")
+
+        st.markdown("### 5.5 공급능력 제약")
+        st.latex(r"\sum_f RP_{frs}\le Cap_{rs}")
+        st.markdown("각 재질-공급지 조합의 총 생산량은 해당 공급지의 최대 생산가능량을 넘을 수 없습니다.")
+
+        st.markdown("### 5.6 탄소배출량 계산과 상한")
+        st.latex(r"C=C^{RP}+C^{RT}+C^{FP}+C^{FT}")
+        st.latex(r"C^{RP}=\sum_{f,r,s}\frac{EF^{RP}_{rs}}{1-L_r}RP_{frs}")
+        st.latex(r"C^{RT}=\sum_{f,r,s,p,k} e^{RT}_{spk} RT_{frspk}")
+        st.latex(r"C^{FP}=\sum_{f,p} e^{FP}_{fp} FP_{fp}")
+        st.latex(r"C^{FT}=\sum_{f,p,k} e^{FT}_{pk} FT_{fpk}")
+        st.markdown(r"총 배출량은 생산, 공급지→조립지 운송, 조립, 조립지→시장 운송 배출량의 합입니다. 철강과 알루미늄에는 손실률 \(L_r=0.3\)이 반영됩니다.")
+        st.markdown("**차급 평균 상한(class-average)**")
+        st.latex(r"\sum_{f\in g} C_f \le \bar{E}^{cap}_g \sum_{f\in g} D_f \qquad (g\in\{small,standard\})")
+        st.markdown("동일 차급 제품들의 수요가중 평균 배출량이 시나리오 상한 이하가 되도록 제약합니다.")
+        st.markdown("**트림별 상한(product-strict)**")
+        st.latex(r"C_f\le E^{cap}_f D_f")
+        st.markdown("각 제품 트림별 배출량이 개별 탄소상한을 직접 만족하도록 제약합니다.")
+
+        st.markdown("### 5.7 PDF 기반 운송계수 구조")
+        st.latex(r"e^{RT}_{spk}=\sum_{\ell\in k} d_{spk\ell}EF_{\ell,region(\ell)}")
+        st.markdown("유럽-유럽 구간은 도로/철도 직접운송을 사용합니다. 비유럽 국제구간은 해상 또는 항공 주운송에 출발·도착 내륙운송을 결합합니다.")
+
+        st.markdown("### 5.8 코드 매핑")
+        mapping = pd.DataFrame([
+            ["RP_{frs}", "IndexLayout.rp()", "공급지의 순사용 가능 생산량", "연속"],
+            ["RT_{frspk}", "IndexLayout.rt()", "허용된 복합경로별 공급지→조립지 물량", "연속"],
+            ["FP_{fp}", "IndexLayout.fp()", "조립지별 완제품 생산량", "연속"],
+            ["FT_{fpk}", "IndexLayout.ft()", "허용된 복합경로별 조립지→프랑스 물량", "연속"],
+            ["ZM_{fsp}, ZS_{fsp}", "IndexLayout.z1()/z2() [modular]", "10kWh/5kWh 모듈 수량", "연속"],
+            ["ZL_{fsp}", "IndexLayout.z1() [line]", "라인 생산용 배터리 팩 등가량", "연속"],
+            ["A^{raw}_{spk}, A^{fin}_{pk}", "country_transport_rules.csv + build_route_matrices()", "국가별 운송수단 가용성", "고정 0/1 파라미터"],
+            ["c^{RT}_{spk}, e^{RT}_{spk}", "build_route_matrices()", "복합운송 경로별 비용·배출계수", "파라미터"],
+            ["EF^{RP}_{rs}, L_r", "raw_material_suppliers.csv + material_parameters.csv", "국가별 생산배출계수와 손실률", "파라미터"],
+        ], columns=["수학 변수/파라미터", "코드·CSV", "의미", "정의역/유형"])
+        st.dataframe(mapping, hide_index=True, use_container_width=True)
+
+        st.markdown("### 5.9 구현된 제약식과 코드 위치")
+        equations_df = pd.DataFrame([
+            ["수요 충족", "sum FT = D", "build_pdf_route_lp_model() 1)", "프랑스 수요를 정확히 충족"],
+            ["배터리 제약(모듈)", "sum RT = 10 ZM + 5 ZS", "build_pdf_route_lp_model() 2)", "배터리 모듈 구조 반영"],
+            ["배터리 제약(라인)", "sum RT = B_f ZL, sum ZL = FP", "build_pdf_route_lp_model() 2)", "배터리 팩 구조 반영"],
+            ["재질 수지", "sum RT = a_fr FP", "build_pdf_route_lp_model() 3)", "조립지의 유입량=필요량"],
+            ["조립지 출고 수지", "FP = sum FT", "build_pdf_route_lp_model() 4)", "조립 수량=출고 수량"],
+            ["공급지 출고 수지", "RP = sum RT", "build_pdf_route_lp_model() 5)", "생산량=출고량"],
+            ["공급능력", "sum_f RP <= Cap", "build_pdf_route_lp_model() 6)", "공급지 최대 생산능력"],
+            ["탄소상한", "product-strict 또는 class-average", "build_pdf_route_lp_model() 7)", "시나리오별 탄소기준"],
+        ], columns=["제약식", "수식 요약", "코드 위치", "설명"])
+        st.dataframe(equations_df, hide_index=True, use_container_width=True)
+
+        st.markdown("### 5.10 PDF 기반 구현 기준")
+        checks = pd.DataFrame([
+            ["제품 수", 6, "products.csv"],
+            ["재질 수", 4, "steel/aluminum/other/battery"],
+            ["공급·조립 위치 수", 24, "assembly_locations.csv"],
+            ["경로 대안 수", len(ROUTE_MODE_CODES), ", ".join(ROUTE_MODE_CODES)],
+            ["철강 손실률", 0.3, "material_parameters.csv"],
+            ["알루미늄 손실률", 0.3, "material_parameters.csv"],
+            ["수요 충족", "등식", "sum FT = D"],
+            ["확률적 수단 선택", "미사용", "운송수단별 물량을 LP가 직접 결정"],
+        ], columns=["검사항목", "구현값", "근거/코드"])
+        st.dataframe(checks, hide_index=True, use_container_width=True)
+        st.caption(f"역사적 Xpress 참조 LP SHA-256: {REFERENCE_LP_SHA256} · 이 5번 탭은 수학적 모형이 업데이트될 때마다 함께 수정되는 공식 설명 탭입니다.")
+
+    with tabs[5]:
         st.header("포스터 기준 결과와 비교")
         poster_path = ASSET_DIR / "poster_reference.png"
         if poster_path.exists():
@@ -1952,75 +2322,6 @@ def run_app():
             ).abs()
             st.markdown("### 재계산값–포스터 비교")
             st.dataframe(compare, hide_index=True, use_container_width=True)
-
-    with tabs[4]:
-        st.header("수학모형과 코드의 대응")
-        st.markdown(
-            r"""
-**목적함수**
-
-\[
-\min Z=
-\sum_{f,r,s} c^{RP}_{rs}RP_{frs}
-+\sum_{f,r,s,p,k}c^{RT}_{spk}RT_{frspk}
-+\sum_{f,p}c^{FP}_{fp}FP_{fp}
-+\sum_{f,p,k}c^{FT}_{pk}FT_{fpk}.
-\]
-
-**연속 LP 정의역**
-
-\[
-RP,RT,FP,FT,ZM,ZS,ZL\ge0.
-\]
-
-운송수단 선택확률이나 \(\alpha,\beta\)는 사용하지 않습니다. 국가별 허용 여부는 고정 파라미터 \(A_{spk}\)로 정하고,
-허용되지 않은 경로는 \(RT_{frspk}=0\), \(FT_{fpk}=0\)으로 고정합니다. 허용된 여러 경로의 물량은 LP가 비용과 탄소상한에 따라 직접 나눕니다.
-
-**주요 등식·부등식**
-
-\[
-RP_{frs}=\sum_{p,k}RT_{frspk},
-\]
-
-\[
-\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp},
-\]
-
-\[
-FP_{fp}=\sum_kFT_{fpk},\qquad \sum_{p,k}FT_{fpk}=D_f,
-\]
-
-\[
-\sum_fRP_{frs}\le Cap_{rs}.
-\]
-
-철강·알루미늄 생산배출량에는 PDF 손실률 0.3을 적용합니다. 비유럽권 국제경로는 해상/항공 주구간과 출발·도착 내륙 도로/철도 구간의 배출량을 합산합니다.
-"""
-        )
-        st.markdown("### 코드 매핑")
-        mapping = pd.DataFrame([
-            ["RP", "IndexLayout.rp()", "공급지의 순사용 가능 생산량", "연속"],
-            ["RT", "IndexLayout.rt()", "허용된 복합경로별 공급지→조립지 물량", "연속"],
-            ["FP", "IndexLayout.fp()", "조립지별 완제품 생산량", "연속"],
-            ["FT", "IndexLayout.ft()", "허용된 복합경로별 조립지→프랑스 물량", "연속"],
-            ["ZM/ZS 또는 ZL", "IndexLayout.z1()/z2()", "모듈 또는 팩 등가량", "연속"],
-            ["A", "country_transport_rules.csv", "국가별 운송수단 가용성", "고정 0/1 파라미터"],
-        ], columns=["수학 변수/파라미터", "코드·CSV", "의미", "정의역"])
-        st.dataframe(mapping, hide_index=True, use_container_width=True)
-
-        st.markdown("### PDF 기반 구현 기준")
-        checks = pd.DataFrame([
-            ["제품 수", 6, "products.csv"],
-            ["재질 수", 4, "steel/aluminum/other/battery"],
-            ["공급·조립 위치 수", 24, "assembly_locations.csv"],
-            ["경로 대안 수", len(ROUTE_MODE_CODES), ", ".join(ROUTE_MODE_CODES)],
-            ["철강 손실률", 0.3, "material_parameters.csv"],
-            ["알루미늄 손실률", 0.3, "material_parameters.csv"],
-            ["수요 충족", "등식", "sum FT = D"],
-            ["확률적 수단 선택", "미사용", "운송수단별 물량을 LP가 직접 결정"],
-        ], columns=["검사항목", "구현값", "근거/코드"])
-        st.dataframe(checks, hide_index=True, use_container_width=True)
-        st.caption(f"역사적 Xpress 참조 LP SHA-256: {REFERENCE_LP_SHA256} · v8 운송구조는 PDF 기반으로 변경됨")
 
 
 if __name__ == "__main__":
