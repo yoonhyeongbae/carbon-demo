@@ -1,30 +1,28 @@
-# DEPLOYMENT_MARKER: ORTOOLS_V7_3_LINE_SINGLE_BATTERY_SUPPLIER
+# DEPLOYMENT_MARKER: ORTOOLS_V7_2_NO_SCIPY_IMPORT
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import json
 import math
 import time
 import zipfile
+from array import array
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-import folium
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from folium.plugins import Fullscreen
 from geopy.distance import geodesic
 from ortools.linear_solver import pywraplp
 
 try:
     import streamlit as st
-    from streamlit_folium import st_folium
 except Exception:  # local syntax/core testing without Streamlit
     st = None
-    st_folium = None
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -32,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "xpress-ortools-line-single-supplier-v7.3"
-APP_PACKAGE_ID = "20260803-2224-KST"
+APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-memory-safe-v7.4"
+APP_PACKAGE_ID = "20260804-memory-safe"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -77,6 +75,7 @@ BIG_M = 1_000_000.0
 MIN_DISTANCE_KM = 50.0
 MATERIAL_LOSS_RATE = 0.0
 FLOW_TOL = 1e-6
+MAX_SENSITIVITY_POINTS = 5
 
 
 # -----------------------------------------------------------------------------
@@ -114,6 +113,17 @@ def make_data_zip() -> bytes:
         if ref.exists():
             zf.write(ref, arcname="reference/electric_car_modular.lp")
     return memory.getvalue()
+
+
+# Cache only small immutable inputs and the reference ZIP. Limiting entries prevents
+# an unbounded process-wide cache on Streamlit Community Cloud.
+if st is not None:
+    load_default_tables = st.cache_data(
+        show_spinner=False, max_entries=1
+    )(load_default_tables)
+    make_data_zip = st.cache_data(
+        show_spinner=False, max_entries=1
+    )(make_data_zip)
 
 
 def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
@@ -207,6 +217,32 @@ def ordered_tables(tables: Mapping[str, pd.DataFrame]):
 def rounded_distance_km(lat1: float, lon1: float, lat2: float, lon2: float, minimum: float = MIN_DISTANCE_KM) -> float:
     distance = geodesic((float(lat1), float(lon1)), (float(lat2), float(lon2))).km
     return round(max(float(minimum), float(distance)), 2)
+
+
+@lru_cache(maxsize=4)
+def cached_distance_matrices(
+    plant_coordinates: Tuple[Tuple[float, float], ...],
+    market_coordinate: Tuple[float, float],
+    minimum_market_distance: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Reuse the same 24x24 geodesic matrices across scenarios and modes."""
+    count = len(plant_coordinates)
+    raw = np.zeros((count, count), dtype=np.float64)
+    for s, (lat_s, lon_s) in enumerate(plant_coordinates):
+        for p, (lat_p, lon_p) in enumerate(plant_coordinates):
+            raw[s, p] = rounded_distance_km(lat_s, lon_s, lat_p, lon_p)
+
+    final = np.zeros(count, dtype=np.float64)
+    market_lat, market_lon = market_coordinate
+    for p, (lat_p, lon_p) in enumerate(plant_coordinates):
+        final[p] = rounded_distance_km(
+            lat_p, lon_p, market_lat, market_lon, minimum_market_distance
+        )
+
+    # Treat cached matrices as immutable. Each LPModel only keeps references.
+    raw.setflags(write=False)
+    final.setflags(write=False)
+    return raw, final
 
 
 def carbon_cap_from_score(vehicle_class: str, score: float) -> float:
@@ -312,18 +348,8 @@ class IndexLayout:
         return self.n_ft
 
     @property
-    def off_line_supplier(self) -> int:
-        return self.off_beta + self.n_beta
-
-    @property
-    def n_line_supplier(self) -> int:
-        # Poster line-production assumption: one battery production location
-        # is selected for each assembly location, shared by all vehicle models.
-        return self.S * self.P if self.mode == "line" else 0
-
-    @property
     def n_vars(self) -> int:
-        return self.off_line_supplier + self.n_line_supplier
+        return self.off_beta + self.n_beta
 
     def rp(self, f: int, r: int, s: int) -> int:
         return self.off_rp + ((f * self.R + r) * self.S + s)
@@ -351,11 +377,6 @@ class IndexLayout:
     def beta(self, f: int, p: int, t: int) -> int:
         return self.off_beta + (f * self.P + p) * self.T + t
 
-    def line_supplier(self, s: int, p: int) -> int:
-        if self.mode != "line":
-            raise ValueError("line_supplier exists only in line mode")
-        return self.off_line_supplier + s * self.P + p
-
 
 class LinearConstraintBuilder:
     """Compact row-wise storage used to build an OR-Tools MPSolver model.
@@ -366,14 +387,16 @@ class LinearConstraintBuilder:
 
     def __init__(self, n_vars: int):
         self.n_vars = int(n_vars)
-        self.eq_cols: List[int] = []
-        self.eq_data: List[float] = []
-        self.eq_starts: List[int] = [0]
-        self.eq_rhs: List[float] = []
-        self.ub_cols: List[int] = []
-        self.ub_data: List[float] = []
-        self.ub_starts: List[int] = [0]
-        self.ub_rhs: List[float] = []
+        # array('I') / array('d') stores coefficients compactly instead of
+        # hundreds of thousands of boxed Python int/float objects.
+        self.eq_cols = array("I")
+        self.eq_data = array("d")
+        self.eq_starts = array("I", [0])
+        self.eq_rhs = array("d")
+        self.ub_cols = array("I")
+        self.ub_data = array("d")
+        self.ub_starts = array("I", [0])
+        self.ub_rhs = array("d")
 
     def add_eq(self, cols: Sequence[int], vals: Sequence[float], rhs: float):
         if len(cols) != len(vals):
@@ -406,11 +429,13 @@ class LinearConstraintBuilder:
     def clear_coefficients(self) -> None:
         self.eq_cols.clear()
         self.eq_data.clear()
-        self.eq_starts[:] = [0]
+        self.eq_starts.clear()
+        self.eq_starts.append(0)
         self.eq_rhs.clear()
         self.ub_cols.clear()
         self.ub_data.clear()
-        self.ub_starts[:] = [0]
+        self.ub_starts.clear()
+        self.ub_starts.append(0)
         self.ub_rhs.clear()
 
 
@@ -496,30 +521,23 @@ def build_xpress_relaxation_model(
         mode_cost[t] = float(row["transport_cost_eur_per_unitkm"])
         mode_ef[t] = float(row["transport_ef_kgco2_per_unitkm"])
 
-    raw_distances = np.zeros((layout.S, layout.P), dtype=float)
-    for s in range(layout.S):
-        for p in range(layout.P):
-            raw_distances[s, p] = rounded_distance_km(
-                plants.iloc[s]["latitude"], plants.iloc[s]["longitude"],
-                plants.iloc[p]["latitude"], plants.iloc[p]["longitude"],
-            )
-
     market = markets.iloc[0]
     minimum_market_distance = float(market.get("minimum_distance_km", MIN_DISTANCE_KM))
-    final_distances = np.zeros(layout.P, dtype=float)
-    for p in range(layout.P):
-        final_distances[p] = rounded_distance_km(
-            plants.iloc[p]["latitude"], plants.iloc[p]["longitude"],
-            market["latitude"], market["longitude"], minimum_market_distance,
-        )
+    plant_coordinates = tuple(
+        (float(row["latitude"]), float(row["longitude"]))
+        for _, row in plants.iterrows()
+    )
+    raw_distances, final_distances = cached_distance_matrices(
+        plant_coordinates,
+        (float(market["latitude"]), float(market["longitude"])),
+        minimum_market_distance,
+    )
 
     c = np.zeros(layout.n_vars, dtype=float)
     lb = np.zeros(layout.n_vars, dtype=float)
     ub = np.full(layout.n_vars, np.inf, dtype=float)
     ub[layout.off_alpha:layout.off_alpha + layout.n_alpha] = 1.0
     ub[layout.off_beta:layout.off_beta + layout.n_beta] = 1.0
-    if layout.n_line_supplier:
-        ub[layout.off_line_supplier:layout.off_line_supplier + layout.n_line_supplier] = 1.0
 
     emission_rp = np.zeros(layout.n_rp, dtype=float)
     emission_rt = np.zeros(layout.n_rt, dtype=float)
@@ -623,11 +641,8 @@ def build_xpress_relaxation_model(
                 vals.append(-battery_kwh)
                 rows.add_eq(cols, vals, 0.0)
     else:
-        # Poster line-production assumption:
-        # (a) route kWh = model-specific pack kWh * ZL,
-        # (b) pack-equivalent flow equals the assembled vehicle flow,
-        # (c) each assembly location may receive line packs from at most one
-        #     battery production location, shared across all vehicle models.
+        # Line-mode reconstruction from the Word/Xpress variable definition:
+        # route kWh = pack kWh * ZL, and total pack-equivalent flow = FP.
         for f in range(layout.F):
             battery_kwh = float(products.iloc[f]["battery_kwh"])
             for s in range(layout.S):
@@ -637,29 +652,10 @@ def build_xpress_relaxation_model(
                     cols.append(layout.z1(f, s, p))
                     vals.append(-battery_kwh)
                     rows.add_eq(cols, vals, 0.0)
-
-                    # A line-pack flow can use supplier s at plant p only when
-                    # U[s,p] is selected. D_f is a valid upper bound because
-                    # no plant can assemble more than the total demand of f.
-                    rows.add_le(
-                        [layout.z1(f, s, p), layout.line_supplier(s, p)],
-                        [1.0, -demand_values[f]],
-                        0.0,
-                    )
-
             for p in range(layout.P):
                 cols = [layout.z1(f, s, p) for s in range(layout.S)] + [layout.fp(f, p)]
                 vals = [1.0] * layout.S + [-1.0]
                 rows.add_eq(cols, vals, 0.0)
-
-        # One battery production location per assembly location. When a plant
-        # has zero output, all U[s,p] may remain zero; positive FP forces one U.
-        for p in range(layout.P):
-            rows.add_le(
-                [layout.line_supplier(s, p) for s in range(layout.S)],
-                [1.0] * layout.S,
-                1.0,
-            )
 
     # 5) Steel, aluminum, and other-material balances at each assembly location.
     material_columns = ["steel_kg", "aluminum_kg", "other_material_kg"]
@@ -775,32 +771,18 @@ def build_xpress_relaxation_model(
     )
 
 
-def _create_ortools_solver(production_mode: str) -> Tuple[pywraplp.Solver, str]:
-    """Create an OR-Tools backend suited to each production model.
+def _create_ortools_lp_solver() -> Tuple[pywraplp.Solver, str]:
+    """Create the same continuous LP with an OR-Tools backend.
 
-    Line mode contains the poster's single-battery-supplier binary variables,
-    so SCIP/CBC is required. Modular mode remains a continuous LP and uses
-    GLOP/CLP/PDLP.
+    GLOP is the primary backend. CLP and PDLP are fallbacks for environments
+    where a particular backend is unavailable.
     """
-    if production_mode == "line":
-        candidates = (
-            ("SCIP", "SCIP"),
-            ("CBC_MIXED_INTEGER_PROGRAMMING", "CBC"),
-            ("CBC", "CBC"),
-        )
-    else:
-        candidates = (("GLOP", "GLOP"), ("CLP", "CLP"), ("PDLP", "PDLP"))
-
-    for solver_id, label in candidates:
-        solver = pywraplp.Solver.CreateSolver(solver_id)
+    for solver_name in ("GLOP", "CLP", "PDLP"):
+        solver = pywraplp.Solver.CreateSolver(solver_name)
         if solver is not None:
-            return solver, label
-    if production_mode == "line":
-        raise RuntimeError(
-            "OR-Tools MIP solver is unavailable. Install the standard 'ortools' wheel "
-            "with SCIP or CBC support."
-        )
+            return solver, solver_name
     raise RuntimeError("OR-Tools LP solver is unavailable. Install the 'ortools' package.")
+
 
 def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None:
     milliseconds = max(1, int(float(time_limit_sec) * 1000.0))
@@ -812,32 +794,19 @@ def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None
 
 def solve_lp_model(model: LPModel, time_limit_sec: int = 180) -> SolveResult:
     started = time.perf_counter()
-    solver, solver_name = _create_ortools_solver(model.layout.mode)
+    solver, solver_name = _create_ortools_lp_solver()
     _set_solver_time_limit(solver, time_limit_sec)
     try:
         solver.SetNumThreads(1)
     except Exception:
         pass
-    if model.layout.mode == "line" and solver_name == "SCIP":
-        try:
-            solver.SetSolverSpecificParametersAsString(
-                "limits/gap = 0.001\n"
-                "presolving/maxrounds = 10\n"
-                "parallel/maxnthreads = 1"
-            )
-        except Exception:
-            pass
 
     infinity = solver.infinity()
     variables = []
-    line_binary_start = model.layout.off_line_supplier
     for i in range(model.layout.n_vars):
         lower = float(model.lb[i])
         upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
-        if model.layout.mode == "line" and i >= line_binary_start:
-            variables.append(solver.IntVar(0.0, 1.0, ""))
-        else:
-            variables.append(solver.NumVar(lower, upper, ""))
+        variables.append(solver.NumVar(lower, upper, ""))
 
     objective = solver.Objective()
     for idx in np.flatnonzero(model.c):
@@ -950,7 +919,6 @@ def extract_solution(result: SolveResult) -> Dict:
             "message": result.message,
             "wall_time_sec": result.wall_time_sec,
             "objective_value": result.objective_value,
-            "model": result.model,
         }
 
     model = result.model
@@ -965,10 +933,7 @@ def extract_solution(result: SolveResult) -> Dict:
     fp = x[layout.off_fp:layout.off_ft].reshape(layout.F, layout.P)
     ft = x[layout.off_ft:layout.off_z1].reshape(layout.F, layout.P, layout.T)
     alpha = x[layout.off_alpha:layout.off_beta].reshape(layout.F, layout.R, layout.S, layout.P, layout.T)
-    beta = x[layout.off_beta:layout.off_line_supplier].reshape(layout.F, layout.P, layout.T)
-    line_supplier = None
-    if layout.mode == "line":
-        line_supplier = x[layout.off_line_supplier:].reshape(layout.S, layout.P)
+    beta = x[layout.off_beta:].reshape(layout.F, layout.P, layout.T)
 
     supplier_records: List[Dict] = []
     for f, r, s in np.argwhere(rp > FLOW_TOL):
@@ -1025,20 +990,11 @@ def extract_solution(result: SolveResult) -> Dict:
         product = products.iloc[f]
         plant = plants.iloc[p]
         units = float(fp[f, p])
-        selected_battery_supplier_index = np.nan
-        selected_battery_supplier = ""
-        if line_supplier is not None:
-            selected = np.flatnonzero(line_supplier[:, p] > 0.5)
-            if len(selected):
-                selected_battery_supplier_index = int(selected[0]) + 1
-                selected_battery_supplier = str(plants.iloc[int(selected[0])]["location_name"])
         plant_records.append({
             "product_id": product["product_id"],
             "product_name": product["product_name_ko"],
             "plant_index": p + 1,
             "plant_location": plant["location_name"],
-            "line_battery_supplier_index": selected_battery_supplier_index,
-            "line_battery_supplier": selected_battery_supplier,
             "assembled_vehicle_equivalents": units,
             "assembly_mass_kg": units * float(product["nonbattery_mass_kg"]),
             "assembly_cost_eur": units * float(product["nonbattery_mass_kg"]) * float(plant["assembly_cost_eur_per_kg"]),
@@ -1156,9 +1112,9 @@ def extract_solution(result: SolveResult) -> Dict:
         "solver_name": result.solver_name,
         "solver_version": result.solver_version,
         "solver_iterations": result.iterations,
-        "continuous_variable_count": layout.n_vars - layout.n_line_supplier,
-        "integer_variable_count": layout.n_line_supplier,
-        "binary_variable_count": layout.n_line_supplier,
+        "continuous_variable_count": layout.n_vars,
+        "integer_variable_count": 0,
+        "binary_variable_count": 0,
         "cost_breakdown": {
             "원자재·배터리 생산비": production_cost,
             "부품 운송비": raw_transport_cost,
@@ -1183,6 +1139,25 @@ def extract_solution(result: SolveResult) -> Dict:
     }
 
 
+def _release_model_memory(model: Optional[LPModel]) -> None:
+    if model is None:
+        return
+    try:
+        model.rows.clear_coefficients()
+        model.c = np.empty(0, dtype=float)
+        model.lb = np.empty(0, dtype=float)
+        model.ub = np.empty(0, dtype=float)
+        model.emission_rp = np.empty(0, dtype=float)
+        model.emission_rt = np.empty(0, dtype=float)
+        model.emission_fp = np.empty(0, dtype=float)
+        model.emission_ft = np.empty(0, dtype=float)
+        model.demand_values = np.empty(0, dtype=float)
+        model.raw_distances = np.empty((0, 0), dtype=float)
+        model.final_distances = np.empty(0, dtype=float)
+    except Exception:
+        pass
+
+
 def solve_case(
     tables: Mapping[str, pd.DataFrame],
     scenario_id: str,
@@ -1191,15 +1166,28 @@ def solve_case(
     time_limit_sec: int,
     score_override: Optional[float] = None,
 ) -> Dict:
-    model = build_xpress_relaxation_model(
-        tables,
-        production_mode=production_mode,
-        scenario_id=scenario_id,
-        cap_application=cap_application,
-        score_override=score_override,
-    )
-    result = solve_lp_model(model, time_limit_sec=time_limit_sec)
-    return extract_solution(result)
+    model: Optional[LPModel] = None
+    result: Optional[SolveResult] = None
+    try:
+        model = build_xpress_relaxation_model(
+            tables,
+            production_mode=production_mode,
+            scenario_id=scenario_id,
+            cap_application=cap_application,
+            score_override=score_override,
+        )
+        result = solve_lp_model(model, time_limit_sec=time_limit_sec)
+        compact = extract_solution(result)
+        # The session stores only compact summaries/nonzero routes, never the
+        # 119,376-value solution vector or LP coefficient arrays.
+        return compact
+    finally:
+        if result is not None:
+            result.x = None
+        _release_model_memory(model)
+        result = None
+        model = None
+        gc.collect()
 
 
 def results_zip(results: Mapping[Tuple[str, str], Dict]) -> bytes:
@@ -1237,6 +1225,11 @@ def results_zip(results: Mapping[Tuple[str, str], Dict]) -> bytes:
 # Mapping and charts
 # -----------------------------------------------------------------------------
 def build_supply_map(result: Dict, height: int = 480):
+    # Heavy visualization libraries are imported only when the user asks for
+    # one map. This materially lowers idle-process memory.
+    import folium
+    from folium.plugins import Fullscreen
+
     plants = result["plants"]
     route_df = result.get("route_aggregated", pd.DataFrame()).copy()
     final_df = result.get("finished_routes", pd.DataFrame()).copy()
@@ -1369,8 +1362,12 @@ def render_result_map(result: Dict, key: str, height: int = 430):
     if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
         st.warning(f"{result.get('status')}: {result.get('message')}")
         return
+    from streamlit_folium import st_folium
+
     supply_map = build_supply_map(result, height=height)
     st_folium(supply_map, width=None, height=height, key=key)
+    del supply_map
+    gc.collect()
 
 
 def render_solver_metrics(result: Dict):
@@ -1391,12 +1388,10 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### 라인 생산 방식 부품 공급망")
-        render_result_map(line, f"map_{scenario_id}_line")
+        st.markdown("#### 라인 생산 방식")
         render_solver_metrics(line)
     with c2:
-        st.markdown("#### 모듈 활용 분산 생산 방식 부품 공급망")
-        render_result_map(modular, f"map_{scenario_id}_modular")
+        st.markdown("#### 모듈 활용 분산 생산 방식")
         render_solver_metrics(modular)
 
     qtable = quartile_comparison_table(results, scenario_id)
@@ -1413,14 +1408,14 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
 
 def run_app():
     st.set_page_config(
-        page_title="Xpress 기반 전기차 공급망 최적화",
+        page_title="Xpress 기반 전기차 공급망 LP Relaxation",
         page_icon="🚗",
         layout="wide",
     )
     st.title("탄소배출 기반 전기차 공급망 최적화")
     st.caption(
         f"build: {APP_BUILD} · package: {APP_PACKAGE_ID} · "
-        "Xpress 파라미터를 유지하며, 라인 방식에는 포스터의 조립지별 단일 배터리 공급지 제약을 적용"
+        "Xpress 목적함수·후보집합·제약구조를 유지하고 모든 변수를 연속화한 LP relaxation"
     )
 
     defaults = load_default_tables()
@@ -1438,10 +1433,15 @@ def run_app():
             mime="application/zip",
         )
         st.divider()
-        st.write("**변수 정의역**")
-        st.write("RP·RT·FP·FT·ZM·ZS·ZL·α·β: 연속변수")
-        st.write("라인 U[s,p]: 이진변수 — 조립지별 배터리 공급지 하나")
-        st.write("모듈 방식은 완전 연속 LP, 라인 방식은 소규모 이진변수가 포함된 MILP")
+        st.write("**LP relaxation 원칙**")
+        st.write("RP·RT·FP·FT·ZM·ZS·ZL·α·β 모두 연속변수")
+        st.write("α·β 범위: 0~1, Xpress Big-M 제약 유지")
+        st.divider()
+        if st.button("결과 메모리 초기화", use_container_width=True):
+            for key in ("xpress_results", "score_sensitivity", "results_zip_bytes"):
+                st.session_state.pop(key, None)
+            gc.collect()
+            st.success("세션 결과와 생성된 ZIP을 비웠습니다.")
 
     errors = validate_tables(tables)
     if errors:
@@ -1506,16 +1506,22 @@ def run_app():
             "업로드된 Xpress LP가 직접 보증하는 정확한 기준 모형은 시나리오 ② 모듈 방식입니다. "
             "라인 방식과 시나리오 ①·③은 동일 Xpress 파라미터와 Word/포스터의 생산방식·탄소상한 정의를 결합한 재구성 모형입니다."
         )
+        st.info(
+            "Community Cloud 메모리 보호: 계수는 compact array로 구성하고, solver 전달 후 즉시 해제하며, "
+            "세션에는 전체 해 벡터/LPModel이 아닌 요약과 양의 경로만 저장합니다. 지도와 ZIP은 요청할 때 한 개씩 생성합니다."
+        )
 
         b1, b2 = st.columns(2)
         with b1:
             if st.button("선택 조합 실행", type="primary", use_container_width=True):
-                with st.spinner("라인은 OR-Tools SCIP/CBC, 모듈은 GLOP으로 계산하는 중입니다..."):
+                with st.spinner("Xpress 구조의 연속 LP를 OR-Tools GLOP으로 계산하는 중입니다..."):
                     try:
                         res = solve_case(
                             tables, scenario_id, production_mode, cap_application, int(time_limit)
                         )
                         st.session_state.setdefault("xpress_results", {})[(scenario_id, production_mode)] = res
+                        st.session_state.pop("results_zip_bytes", None)
+                        gc.collect()
                         st.success(f"{res['status']} · {res.get('wall_time_sec', 0):.2f}초")
                     except Exception as exc:
                         st.exception(exc)
@@ -1533,15 +1539,17 @@ def run_app():
                         )
                     except Exception as exc:
                         all_results[(s, m)] = {"status": "ERROR", "message": str(exc)}
+                    st.session_state.pop("results_zip_bytes", None)
+                    gc.collect()
                     progress.progress(i / len(cases))
-                status_box.success("6개 조합 계산이 완료되었습니다.")
+                status_box.success("6개 조합 계산이 완료되었습니다. 결과에는 전체 LP/해 벡터가 저장되지 않습니다.")
 
         st.markdown("### 보조금 점수 민감도")
         with st.expander("선택 생산방식의 점수 민감도 실행", expanded=False):
             c1, c2, c3 = st.columns(3)
             min_score = c1.number_input("최소 점수", 0.0, 80.0, 55.0, 1.0)
             max_score = c2.number_input("최대 점수", 0.0, 80.0, 70.0, 1.0)
-            n_points = c3.number_input("점수 개수", 3, 7, 4, 1)
+            n_points = c3.number_input("점수 개수", 3, MAX_SENSITIVITY_POINTS, 3, 1)
             if st.button("점수 민감도 계산"):
                 rows = []
                 scores = np.linspace(float(min_score), float(max_score), int(n_points))
@@ -1562,6 +1570,7 @@ def run_app():
                         })
                     except Exception as exc:
                         rows.append({"minimum_score": score, "status": "ERROR", "message": str(exc)})
+                    gc.collect()
                     p.progress(i / len(scores))
                 st.session_state["score_sensitivity"] = pd.DataFrame(rows)
 
@@ -1578,26 +1587,45 @@ def run_app():
             st.markdown("### 분석 및 결론")
             ratio_df = cost_ratio_dataframe(results)
             if not ratio_df.empty:
-                fig, ax = plt.subplots(figsize=(7, 3.5))
-                ax.bar(ratio_df["scenario_name"], ratio_df["modular_to_line_cost_ratio"])
-                ax.axhline(1.0, linewidth=1)
-                ax.set_ylabel("모듈/라인 비용 비율")
-                ax.set_title("시나리오별 비용 비율")
-                ax.grid(axis="y", alpha=0.25)
-                st.pyplot(fig, use_container_width=False)
+                st.bar_chart(
+                    ratio_df.set_index("scenario_name")[["modular_to_line_cost_ratio"]],
+                    use_container_width=True,
+                )
                 st.dataframe(ratio_df, hide_index=True, use_container_width=True)
 
             valid_results = {
                 key: value for key, value in results.items()
                 if value.get("status") in {"OPTIMAL", "FEASIBLE"}
             }
+
             if valid_results:
-                st.download_button(
-                    "전체 결과 ZIP 다운로드",
-                    results_zip(valid_results),
-                    file_name="xpress_lp_relaxation_results.zip",
-                    mime="application/zip",
+                st.markdown("### 공급망 지도(요청 시 한 개만 생성)")
+                map_choice = st.selectbox(
+                    "지도 조합",
+                    list(valid_results.keys()),
+                    format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
+                    key="lazy_map_choice",
                 )
+                if st.checkbox("선택한 공급망 지도 표시", value=False, key="show_one_map"):
+                    render_result_map(
+                        valid_results[map_choice],
+                        f"lazy_map_{map_choice[0]}_{map_choice[1]}",
+                        height=470,
+                    )
+
+                st.markdown("### 결과 파일")
+                if st.button("전체 결과 ZIP 생성", key="build_results_zip"):
+                    with st.spinner("CSV 결과를 ZIP으로 묶는 중입니다..."):
+                        st.session_state["results_zip_bytes"] = results_zip(valid_results)
+                        gc.collect()
+                zip_bytes = st.session_state.get("results_zip_bytes")
+                if isinstance(zip_bytes, (bytes, bytearray)):
+                    st.download_button(
+                        "전체 결과 ZIP 다운로드",
+                        data=zip_bytes,
+                        file_name="xpress_lp_relaxation_results.zip",
+                        mime="application/zip",
+                    )
 
             sensitivity = st.session_state.get("score_sensitivity")
             if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
@@ -1605,12 +1633,10 @@ def run_app():
                 st.dataframe(sensitivity, hide_index=True, use_container_width=True)
                 valid = sensitivity[sensitivity["status"].isin(["OPTIMAL", "FEASIBLE"])]
                 if not valid.empty:
-                    fig, ax = plt.subplots(figsize=(7, 3.5))
-                    ax.plot(valid["minimum_score"], valid["total_cost_eur"], marker="o")
-                    ax.set_xlabel("최소 보조금 점수")
-                    ax.set_ylabel("총 공급망 비용 (€)")
-                    ax.grid(alpha=0.25)
-                    st.pyplot(fig, use_container_width=False)
+                    st.line_chart(
+                        valid.set_index("minimum_score")[["total_cost_eur"]],
+                        use_container_width=True,
+                    )
 
             st.markdown("### 상세 결과")
             available = [key for key, value in results.items() if value.get("status") in {"OPTIMAL", "FEASIBLE"}]
@@ -1687,20 +1713,10 @@ def run_app():
 +\sum_{f,p,t}c^{FT}_{fpt}FT_{fpt}.
 \]
 
-**정의역**
+**LP relaxation 정의역**
 
 \[
 RP,RT,FP,FT,ZM,ZS,ZL\ge0,\qquad 0\le\alpha,\beta\le1.
-\]
-
-라인 생산에서는 포스터의 단일 공급지 가정을 위해 다음 이진변수만 유지합니다.
-
-\[
-U_{sp}\in\{0,1\},\qquad \sum_s U_{sp}\le1,
-\]
-
-\[
-ZL_{fsp}\le D_fU_{sp}.
 \]
 
 **주요 제약**
@@ -1721,7 +1737,7 @@ FP_{fp}=\sum_tFT_{fpt},\qquad \sum_{p,t}FT_{fpt}=D_f,
 \sum_fRP_{frs}\le1{,}000{,}000.
 \]
 
-Xpress의 운송수단 선택식과 complementary Big-M 연결식은 유지합니다. 다만 라인 방식에서는 한 조립위치가 하나의 배터리 생산위치에서만 팩을 공급받도록 U[s,p]를 이진변수로 둡니다.
+Xpress의 운송수단 선택식과 complementary Big-M 연결식도 그대로 유지합니다. 차이는 정수·이진 정의역만 연속구간으로 완화한 것입니다.
 """
         )
         st.markdown("### 코드 매핑")
@@ -1733,15 +1749,12 @@ Xpress의 운송수단 선택식과 complementary Big-M 연결식은 유지합�
             ["ZM/ZS 또는 ZL", "IndexLayout.z1()/z2()", "모듈 또는 팩 등가량", "연속"],
             ["α", "IndexLayout.alpha()", "부품 운송수단 선택 relaxation", "0~1 연속"],
             ["β", "IndexLayout.beta()", "완제품 운송수단 선택 relaxation", "0~1 연속"],
-            ["U", "IndexLayout.line_supplier()", "라인 조립지별 단일 배터리 공급지 선택", "이진"],
         ], columns=["수학 변수", "코드", "의미", "정의역"])
         st.dataframe(mapping, hide_index=True, use_container_width=True)
 
         st.markdown("### Xpress 구조 검증 기준")
         checks = pd.DataFrame([
             ["모듈 S2 변수 수", 119376, "IndexLayout('modular').n_vars"],
-            ["라인 변수 수", 116496, "연속 115,920개 + U 이진 576개"],
-            ["라인 단일공급 이진변수", 576, "24 공급지 × 24 조립지"],
             ["모듈 S2 제약 수", 74694, "탄소상한이 없는 기본 Xpress 구조"],
             ["제품 수", 6, "products.csv"],
             ["재질 수", 4, "고정"],
