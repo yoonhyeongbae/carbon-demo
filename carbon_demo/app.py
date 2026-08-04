@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-battery-parity-v8.10"
-APP_PACKAGE_ID = "20260804-v8.10-fixed-score-battery-parity-four-scenarios"
+APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.11"
+APP_PACKAGE_ID = "20260804-v8.11-fixed-score-fleet-total-four-scenarios"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -3195,7 +3195,7 @@ def run_app():
 
 
 # =============================================================================
-# V8.10 extended model: fixed per-trim policy caps, material-specific
+# V8.11 extended model: fixed fleet-total policy cap, material-specific
 # country selection, and supply-chain-cost-only objective.
 # =============================================================================
 
@@ -3281,13 +3281,21 @@ def build_pdf_route_lp_model(
     assembly_chosen = set(selected_map["assembly"])
     active_assembly = np.asarray([name in assembly_chosen for name in all_location_names], dtype=bool)
 
-    scenario["carbon_cap_mode"] = "product_strict"
+    scenario["carbon_cap_mode"] = "fleet_total"
     scenario["selected_country_map_json"] = json.dumps(
         {key: list(values) for key, values in selected_map.items()}, ensure_ascii=False
     )
     scenario["selected_location_count"] = len(set().union(*(set(v) for v in selected_map.values())))
-    scenario["baseline_total_cap_kgco2"] = np.nan
-    scenario["effective_total_cap_kgco2"] = np.nan
+    if int(scenario.get("apply_carbon_cap", 0)) == 1:
+        fleet_total_cap = float(sum(
+            carbon_cap_from_score(str(products.iloc[f]["vehicle_class"]), applied_score)
+            * float(demand_values[f])
+            for f in range(layout.F)
+        ))
+    else:
+        fleet_total_cap = np.nan
+    scenario["baseline_total_cap_kgco2"] = fleet_total_cap
+    scenario["effective_total_cap_kgco2"] = fleet_total_cap
     scenario["carbon_relaxation_pct"] = 0.0
 
     supplier_cost = np.zeros((layout.R, layout.S), dtype=float)
@@ -3498,14 +3506,13 @@ def build_pdf_route_lp_model(
                 supplier_capacity[r, s],
             )
 
-    # 7) Product-specific carbon caps. Each trim must meet its own cap.
+    # 7) Fleet-total carbon cap for policy scenarios.
+    #    Individual trim emissions remain available as result indicators, but only the
+    #    company-wide sum is constrained. Low-emission trims can offset high-emission trims.
     if int(scenario.get("apply_carbon_cap", 0)) == 1:
+        cols: List[int] = []
+        vals: List[float] = []
         for f in range(layout.F):
-            product = products.iloc[f]
-            cap_per_vehicle = carbon_cap_from_score(str(product["vehicle_class"]), applied_score)
-            cols: List[int] = []
-            vals: List[float] = []
-
             rp_start = f * layout.R * layout.S
             for local in range(layout.R * layout.S):
                 idx = layout.off_rp + rp_start + local
@@ -3531,7 +3538,7 @@ def build_pdf_route_lp_model(
                     if coef:
                         cols.append(idx); vals.append(coef)
 
-            rows.add_le(cols, vals, float(cap_per_vehicle * demand_values[f]))
+        rows.add_le(cols, vals, float(fleet_total_cap))
 
     return LPModel(
         layout=layout,
@@ -3569,7 +3576,7 @@ def build_pdf_route_lp_model(
         emission_rt=emission_rt,
         emission_fp=emission_fp,
         emission_ft=emission_ft,
-        cap_application="product_strict",
+        cap_application="fleet_total",
         selected_locations=selected_map["assembly"],
     )
 
@@ -3582,7 +3589,7 @@ def extract_solution(result: SolveResult) -> Dict:
     except Exception:
         selected_map = {}
     out["selected_country_map"] = selected_map
-    out["carbon_cap_mode"] = "product_strict"
+    out["carbon_cap_mode"] = "fleet_total"
     out["applied_policy_score"] = (
         float(scenario.get("applied_score")) if pd.notna(scenario.get("applied_score", np.nan)) else np.nan
     )
@@ -3597,25 +3604,40 @@ def extract_solution(result: SolveResult) -> Dict:
         product_df = product_df.copy()
         if np.isfinite(applied_score):
             product_df["applied_policy_score"] = applied_score
-            product_df["policy_cap_kgco2_per_vehicle"] = product_df["vehicle_class"].map(
+            product_df["reference_cap_kgco2_per_vehicle"] = product_df["vehicle_class"].map(
                 lambda g: carbon_cap_from_score(str(g), applied_score)
             )
-            product_df["policy_cap_total_kgco2"] = (
-                product_df["policy_cap_kgco2_per_vehicle"] * product_df["demand_units"]
+            product_df["reference_cap_total_kgco2"] = (
+                product_df["reference_cap_kgco2_per_vehicle"] * product_df["demand_units"]
             )
-            product_df["policy_cap_slack_kgco2_per_vehicle"] = (
-                product_df["policy_cap_kgco2_per_vehicle"] - product_df["emissions_per_vehicle_kgco2"]
+            product_df["reference_cap_slack_kgco2_per_vehicle"] = (
+                product_df["reference_cap_kgco2_per_vehicle"] - product_df["emissions_per_vehicle_kgco2"]
             )
-            product_df["policy_cap_met"] = product_df["policy_cap_slack_kgco2_per_vehicle"] >= -1e-5
+            product_df["reference_cap_met_individually"] = (
+                product_df["reference_cap_slack_kgco2_per_vehicle"] >= -1e-5
+            )
         else:
             product_df["applied_policy_score"] = np.nan
-            product_df["policy_cap_kgco2_per_vehicle"] = np.nan
-            product_df["policy_cap_total_kgco2"] = np.nan
-            product_df["policy_cap_slack_kgco2_per_vehicle"] = np.nan
-            product_df["policy_cap_met"] = True
-        product_df["policy_constraint_mode"] = "product_strict"
+            product_df["reference_cap_kgco2_per_vehicle"] = np.nan
+            product_df["reference_cap_total_kgco2"] = np.nan
+            product_df["reference_cap_slack_kgco2_per_vehicle"] = np.nan
+            product_df["reference_cap_met_individually"] = True
+        product_df["policy_constraint_mode"] = "fleet_total"
         out["product_summary"] = product_df
-        out["all_product_caps_met"] = bool(product_df["policy_cap_met"].all())
+        out["all_product_reference_caps_met"] = bool(product_df["reference_cap_met_individually"].all())
+
+    fleet_cap = float(scenario.get("effective_total_cap_kgco2", np.nan))
+    total_emissions = float(out.get("total_emissions_kgco2", np.nan))
+    if np.isfinite(fleet_cap) and np.isfinite(total_emissions):
+        out["fleet_total_cap_kgco2"] = fleet_cap
+        out["fleet_cap_slack_kgco2"] = fleet_cap - total_emissions
+        out["fleet_cap_utilization_pct"] = 100.0 * total_emissions / fleet_cap if fleet_cap else np.nan
+        out["fleet_cap_met"] = bool(total_emissions <= fleet_cap + 1e-5)
+    else:
+        out["fleet_total_cap_kgco2"] = np.nan
+        out["fleet_cap_slack_kgco2"] = np.nan
+        out["fleet_cap_utilization_pct"] = np.nan
+        out["fleet_cap_met"] = True
     return out
 
 
@@ -3746,7 +3768,7 @@ def extract_solution(result: SolveResult) -> Dict:
     out["highest_feasible_score"] = np.nan
     out["subsidy_eligible"] = (
         None if applied is None or not np.isfinite(float(applied))
-        else bool(out.get("all_product_caps_met", False))
+        else bool(out.get("fleet_cap_met", False))
     )
     return out
 
@@ -3970,8 +3992,8 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     st.markdown(
         """
 이 SaaS는 여러 국가에서 6개 전기자동차 트림을 생산하여 프랑스 수요를 정확히 충족하는 공급망을 설계합니다.
-각 시나리오에서 **생산·운송·조립의 총 공급망 비용을 최소화**하며, 정책 시나리오에서는 각 차량 트림이
-60점·65점·70점에 해당하는 개별 탄소상한을 만족해야 합니다.
+각 시나리오에서 **생산·운송·조립의 총 공급망 비용을 최소화**하며, 정책 시나리오에서는 회사 전체 차량의
+총탄소배출량이 60점·65점·70점에 대응하는 fleet-total 탄소예산 이하가 되어야 합니다.
 
 - **시나리오 ①**: 탄소점수 제약이 없는 회사 baseline
 - **시나리오 ②**: 60점 고정 상한
@@ -3998,14 +4020,14 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     with c2:
         outputs = pd.DataFrame([
             ["최적 공급망 비용", "고정된 시나리오 제약 아래 생산·운송·조립 비용의 최소값"],
-            ["트림별 탄소배출량", "각 차량 트림 1대당 실제 배출량과 정책상한 충족 여부"],
-            ["회사 총탄소배출량", "모든 트림의 실제 최적화 배출량을 합한 결과 지표"],
+            ["트림별 탄소배출량", "각 차량 트림 1대당 실제 배출량과 차급별 참고상한"],
+            ["회사 총탄소배출량", "모든 트림의 실제 배출량 합계이며 정책 탄소제약의 좌변"],
             ["공급망 구조", "재질/배터리 생산국가, 차량 조립국가, 운송경로와 물량"],
             ["생산방식 비교", "라인과 모듈 방식의 비용·배출량·경로 차이"],
         ], columns=["Output", "사용자 관점의 의미"])
         show_explained_dataframe(outputs, "Output", "각 행은 하나의 결과 그룹입니다.", value_meaning="오른쪽 열은 사용자가 해석할 결과입니다.")
 
-    st.markdown("### 정책점수와 트림별 탄소상한")
+    st.markdown("### 정책점수와 fleet-total 탄소예산")
     score_table = pd.DataFrame([
         [60, carbon_cap_from_score("small", 60), carbon_cap_from_score("standard", 60)],
         [65, carbon_cap_from_score("small", 65), carbon_cap_from_score("standard", 65)],
@@ -4014,7 +4036,7 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     show_explained_dataframe(
         score_table, "시나리오별 점수 상한",
         "각 행은 하나의 정책 시나리오에 적용되는 점수입니다.",
-        value_meaning="각 트림은 자신의 차량분류에 해당하는 1대당 상한을 개별적으로 만족해야 합니다.",
+        value_meaning="각 차량분류의 1대당 기준값에 트림별 수요를 곱해 모두 합산한 값이 회사 전체 탄소예산이 됩니다.",
     )
 
     st.markdown("### 라인 생산 방식: 3개 Stage")
@@ -4041,7 +4063,7 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
 
 def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.header("수학모형과 코드의 대응")
-    st.info("v8.10: 라인·모듈의 배터리 제조조립 경계를 동일하게 맞추고, S2=60점·S3=65점·S4=70점 고정 시나리오를 적용합니다.")
+    st.info("v8.11: 라인·모듈의 배터리 제조조립 경계는 동일하게 유지하며, S2=60점·S3=65점·S4=70점의 fleet-total 탄소상한을 적용합니다.")
 
     st.markdown("### 5.1 집합")
     set_rows = [
@@ -4129,10 +4151,11 @@ def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.latex(r"E^{BODY}=\sum_{f,p}M_f^{nonbat}e_p^{BODY}FP_{fp}")
     st.markdown("`assembly_ef_kgco2_per_kg`는 배터리를 제외한 자동차 단위질량의 중간가공·차량 조립 EF로만 사용합니다. 두 생산방식에 동일합니다.")
 
-    st.markdown("### 5.9 트림별 탄소상한")
+    st.markdown("### 5.9 회사 전체 차량 탄소상한")
     st.latex(r"E_f=E_f^{PROD}+E_f^{BATASM}+E_f^{IN}+E_f^{BODY}+E_f^{OUT}")
-    st.latex(r"E_f\lear E_{g(f)}(q_s)D_f\qquadorall f")
-    st.markdown("각 트림이 독립적으로 상한을 만족해야 하며, 다른 트림의 여유로 초과분을 상쇄할 수 없습니다.")
+    st.latex(r"E^{Company}=\sum_{f\in F}E_f")
+    st.latex(r"E^{Company}\le\sum_{f\in F}\bar E_{g(f)}(q_s)D_f")
+    st.markdown("정책제약은 회사 전체 차량의 배출량 합계에 한 번만 적용됩니다. 따라서 저배출 트림의 여유가 고배출 트림의 초과분을 상쇄할 수 있습니다. 트림별 배출량과 참고상한은 결과표에서 별도로 확인합니다.")
     st.latex(r"ar E_{other}(q)=17000-rac{q}{80}(17000-6000)")
     st.latex(r"ar E_{reference}(q)=21000-rac{q}{80}(21000-12000)")
 
@@ -4140,26 +4163,34 @@ def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
     scenario_df=tables["scenarios.csv"][["scenario_id","scenario_name","minimum_score","apply_carbon_cap","small_cap_kgco2_per_vehicle","standard_cap_kgco2_per_vehicle"]].copy()
     show_explained_dataframe(scenario_df,"고정 정책 시나리오","각 행은 독립적으로 계산되는 한 정책강도입니다.",value_meaning="S1은 무정책, S2는 60점, S3는 65점, S4는 70점입니다. 점수를 자동으로 낮추지 않습니다.")
 
-    st.markdown("### 5.11 회사 총탄소배출량")
+    st.markdown("### 5.11 회사 총탄소배출량과 상한 이용률")
     st.latex(r"E^{Company}=\sum_fE_f")
-    st.markdown("회사 총배출량은 결과 지표이며 하나의 합산 탄소상한 제약으로 사용하지 않습니다.")
+    st.latex(r"U^{cap}=100\times\frac{E^{Company}}{E^{FleetCap}}")
+    st.markdown("S1에서는 회사 총배출량이 결과 지표로만 사용됩니다. S2~S4에서는 같은 총배출량이 fleet-total 탄소상한의 좌변이며, 상한 이용률이 100% 이하이면 정책제약을 만족합니다.")
 
 
 def render_solver_metrics(result: Dict):
-    status=str(result.get("status","NOT_RUN"))
-    if status!="OPTIMAL":
-        st.error(f"{status}: {result.get('message','최적해를 찾지 못했습니다.')}")
-        if status=="INFEASIBLE":
-            st.caption("현재 고정점수의 트림별 상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없습니다. 수행능력 초과를 뜻하지 않습니다.")
+    status = str(result.get("status", "NOT_RUN"))
+    if status != "OPTIMAL":
+        st.error(f"{status}: {result.get('message', '최적해를 찾지 못했습니다.')}")
+        if status == "INFEASIBLE":
+            st.caption("현재 고정점수의 fleet-total 탄소상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없습니다. 수행능력 초과를 뜻하지 않습니다.")
         return
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric("최적 공급망 비용",f"€{float(result.get('objective_value',0)):,.0f}")
-    c2.metric("회사 총탄소배출량",f"{float(result.get('total_emissions_kgco2',0)):,.0f} kg CO₂-eq")
-    score=result.get("applied_policy_score")
-    c3.metric("적용 정책점수","상한 없음" if score is None or not np.isfinite(float(score)) else f"{float(score):.0f}점")
-    c4.metric("양의 부품 경로",f"{len(result.get('route_aggregated',[])):,}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("최적 공급망 비용", f"€{float(result.get('objective_value', 0)):,.0f}")
+    c2.metric("회사 총탄소배출량", f"{float(result.get('total_emissions_kgco2', 0)):,.0f} kg CO₂-eq")
+    score = result.get("applied_policy_score")
+    c3.metric("적용 정책점수", "상한 없음" if score is None or not np.isfinite(float(score)) else f"{float(score):.0f}점")
+    c4.metric("양의 부품 경로", f"{len(result.get('route_aggregated', [])):,}")
     if score is not None and np.isfinite(float(score)):
-        st.caption(f"모든 트림의 {float(score):.0f}점 개별상한 충족: {'예' if result.get('all_product_caps_met',False) else '아니오'}")
+        cap = float(result.get("fleet_total_cap_kgco2", np.nan))
+        util = float(result.get("fleet_cap_utilization_pct", np.nan))
+        slack = float(result.get("fleet_cap_slack_kgco2", np.nan))
+        st.caption(
+            f"회사 전체 탄소상한: {cap:,.0f} kg CO₂-eq · "
+            f"상한 이용률: {util:.2f}% · 잔여 탄소예산: {slack:,.0f} kg CO₂-eq · "
+            f"충족: {'예' if result.get('fleet_cap_met', False) else '아니오'}"
+        )
 
 
 def cost_ratio_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFrame:
@@ -4243,7 +4274,7 @@ def _make_score_progress_callback(status_box, progress=None, prefix: str = ""):
             if score is None:
                 status_box.info(f"{prefix}탄소상한 없이 공급망 비용 최소화 LP를 계산 중입니다.")
             else:
-                status_box.info(f"{prefix}{float(score):.0f}점의 트림별 탄소상한을 적용하여 최적 공급망을 계산 중입니다.")
+                status_box.info(f"{prefix}{float(score):.0f}점의 fleet-total 탄소상한을 적용하여 최적 공급망을 계산 중입니다.")
         elif event_type == "attempt_end" and event.get("status") == "INFEASIBLE":
             next_score = event.get("next_score")
             if next_score is None:
@@ -4300,7 +4331,7 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
-        st.info("각 시나리오의 고정점수(S2 60점, S3 65점, S4 70점)에서 여섯 차량 트림의 개별 탄소상한을 적용하고 공급망 비용 최소 OPTIMAL 해를 계산합니다. 점수를 자동으로 낮추지 않습니다.")
+        st.info("각 시나리오의 고정점수(S2 60점, S3 65점, S4 70점)에서 회사 전체 차량의 fleet-total 탄소상한 하나를 적용하고 공급망 비용 최소 OPTIMAL 해를 계산합니다. 점수를 자동으로 낮추지 않습니다.")
         c1, c2, c3 = st.columns(3)
         scenario_id = c1.selectbox("시나리오", ["S1", "S2", "S3", "S4"], format_func=lambda x: str(tables["scenarios.csv"].set_index("scenario_id").loc[x, "scenario_name"]))
         production_mode = c2.selectbox("생산 방식", ["line", "modular"], format_func=lambda x: MODE_LABEL[x])
@@ -4317,7 +4348,7 @@ def run_app():
             scenario_row = tables["scenarios.csv"].set_index("scenario_id").loc[s]
             score = float(scenario_row.get("minimum_score", 0.0))
             if int(scenario_row.get("apply_carbon_cap", 0)) == 1:
-                status_box.info(f"{prefix}{score:.0f}점의 트림별 탄소상한에서 비용 최소 공급망을 계산 중입니다.")
+                status_box.info(f"{prefix}{score:.0f}점의 fleet-total 탄소상한에서 비용 최소 공급망을 계산 중입니다.")
             else:
                 status_box.info(f"{prefix}탄소상한 없는 회사 baseline 공급망을 계산 중입니다.")
             if progress is not None:
@@ -4474,7 +4505,7 @@ def run_app():
                         if isinstance(frame, pd.DataFrame):
                             show_explained_dataframe(frame, name, "각 행은 해당 인덱스 조합의 양의 최적화 결과입니다.", value_meaning="열 이름과 값은 물량·비용·배출량·국가를 나타냅니다.")
                 with subtabs[5]:
-                    st.json({k:selected.get(k) for k in ["status","solver_name","solver_version","solver_iterations","variable_count","constraint_count","matrix_nonzeros","wall_time_sec","applied_policy_score","all_product_caps_met","objective_reconstruction_gap_eur"]})
+                    st.json({k:selected.get(k) for k in ["status","solver_name","solver_version","solver_iterations","variable_count","constraint_count","matrix_nonzeros","wall_time_sec","applied_policy_score","fleet_total_cap_kgco2","fleet_cap_slack_kgco2","fleet_cap_utilization_pct","fleet_cap_met","all_product_reference_caps_met","objective_reconstruction_gap_eur"]})
 
     with tabs[4]:
         render_math_model_tab_v89(tables)
