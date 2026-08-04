@@ -8,7 +8,6 @@ import json
 import math
 import time
 import zipfile
-from array import array
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -30,8 +29,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-memory-safe-v7.4"
-APP_PACKAGE_ID = "20260804-memory-safe"
+APP_BUILD = "xpress-parameter-ortools-full-lp-relaxation-stable-memory-v7.5"
+APP_PACKAGE_ID = "20260804-result-fix"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -387,16 +386,18 @@ class LinearConstraintBuilder:
 
     def __init__(self, n_vars: int):
         self.n_vars = int(n_vars)
-        # array('I') / array('d') stores coefficients compactly instead of
-        # hundreds of thousands of boxed Python int/float objects.
-        self.eq_cols = array("I")
-        self.eq_data = array("d")
-        self.eq_starts = array("I", [0])
-        self.eq_rhs = array("d")
-        self.ub_cols = array("I")
-        self.ub_data = array("d")
-        self.ub_starts = array("I", [0])
-        self.ub_rhs = array("d")
+        # Use the same native Python list representation as the previously
+        # validated v7.2 solver path. Memory is released immediately after the
+        # rows are copied into OR-Tools, so results remain stable without
+        # retaining the coefficient matrix in session state.
+        self.eq_cols: List[int] = []
+        self.eq_data: List[float] = []
+        self.eq_starts: List[int] = [0]
+        self.eq_rhs: List[float] = []
+        self.ub_cols: List[int] = []
+        self.ub_data: List[float] = []
+        self.ub_starts: List[int] = [0]
+        self.ub_rhs: List[float] = []
 
     def add_eq(self, cols: Sequence[int], vals: Sequence[float], rhs: float):
         if len(cols) != len(vals):
@@ -429,13 +430,11 @@ class LinearConstraintBuilder:
     def clear_coefficients(self) -> None:
         self.eq_cols.clear()
         self.eq_data.clear()
-        self.eq_starts.clear()
-        self.eq_starts.append(0)
+        self.eq_starts[:] = [0]
         self.eq_rhs.clear()
         self.ub_cols.clear()
         self.ub_data.clear()
-        self.ub_starts.clear()
-        self.ub_starts.append(0)
+        self.ub_starts[:] = [0]
         self.ub_rhs.clear()
 
 
@@ -1371,28 +1370,53 @@ def render_result_map(result: Dict, key: str, height: int = 430):
 
 
 def render_solver_metrics(result: Dict):
+    status = result.get("status")
+    if status not in {"OPTIMAL", "FEASIBLE"}:
+        st.error(f"{status or 'ERROR'}: {result.get('message', '최적화 결과를 생성하지 못했습니다.')}")
+        return False
+
+    objective = result.get("objective_value")
+    emissions = result.get("total_emissions_kgco2")
+    if objective is None or emissions is None:
+        st.error("해가 저장되지 않았습니다. 2번 탭에서 해당 조합을 다시 실행하세요.")
+        return False
+
+    route_count = len(result.get("route_aggregated", []))
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("총비용", f"€{result.get('objective_value', 0):,.0f}")
-    c2.metric("총 탄소배출량", f"{result.get('total_emissions_kgco2', 0):,.0f} kg CO₂-eq")
-    c3.metric("계산시간", f"{result.get('wall_time_sec', 0):.2f}초")
-    c4.metric("양의 부품 경로", f"{len(result.get('route_aggregated', [])):,}")
+    c1.metric("총비용", f"€{float(objective):,.0f}")
+    c2.metric("총 탄소배출량", f"{float(emissions):,.0f} kg CO₂-eq")
+    c3.metric("계산시간", f"{float(result.get('wall_time_sec', 0.0)):.2f}초")
+    c4.metric("양의 부품 경로", f"{route_count:,}")
+    return True
 
 
 def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id: str):
     st.markdown(f"### {SCENARIO_SHORT[scenario_id]} 결과")
     line = results.get((scenario_id, "line"))
     modular = results.get((scenario_id, "modular"))
-    if not line or not modular:
-        st.info("이 시나리오의 라인·모듈 두 결과를 모두 실행해야 포스터 형식으로 비교됩니다.")
+
+    missing = []
+    if not line or line.get("status") not in {"OPTIMAL", "FEASIBLE"}:
+        missing.append("라인 생산")
+    if not modular or modular.get("status") not in {"OPTIMAL", "FEASIBLE"}:
+        missing.append("모듈 활용 분산 생산")
+    if missing:
+        st.info(
+            f"{', '.join(missing)} 결과가 없습니다. 2번 탭에서 해당 조합을 실행하거나 "
+            "‘포스터 6개 조합 순차 실행’을 눌러 주세요."
+        )
         return
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 라인 생산 방식")
-        render_solver_metrics(line)
+        line_ok = render_solver_metrics(line)
     with c2:
         st.markdown("#### 모듈 활용 분산 생산 방식")
-        render_solver_metrics(modular)
+        modular_ok = render_solver_metrics(modular)
+
+    if not (line_ok and modular_ok):
+        return
 
     qtable = quartile_comparison_table(results, scenario_id)
     for col in [MODE_LABEL["line"], MODE_LABEL["modular"]]:
@@ -1401,9 +1425,10 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
     st.markdown("#### 부품 운송량 사분위수 비율")
     st.dataframe(qtable, hide_index=True, use_container_width=True)
 
-    if line.get("objective_value") and modular.get("objective_value"):
-        ratio = modular["objective_value"] / line["objective_value"]
-        st.caption(f"모듈/라인 총비용 비율: {ratio:.6f}")
+    line_cost = float(line["objective_value"])
+    modular_cost = float(modular["objective_value"])
+    if line_cost != 0.0:
+        st.caption(f"모듈/라인 총비용 비율: {modular_cost / line_cost:.6f}")
 
 
 def run_app():
@@ -1438,7 +1463,7 @@ def run_app():
         st.write("α·β 범위: 0~1, Xpress Big-M 제약 유지")
         st.divider()
         if st.button("결과 메모리 초기화", use_container_width=True):
-            for key in ("xpress_results", "score_sensitivity", "results_zip_bytes"):
+            for key in ("xpress_results", "xpress_errors", "score_sensitivity", "results_zip_bytes"):
                 st.session_state.pop(key, None)
             gc.collect()
             st.success("세션 결과와 생성된 ZIP을 비웠습니다.")
@@ -1507,42 +1532,67 @@ def run_app():
             "라인 방식과 시나리오 ①·③은 동일 Xpress 파라미터와 Word/포스터의 생산방식·탄소상한 정의를 결합한 재구성 모형입니다."
         )
         st.info(
-            "Community Cloud 메모리 보호: 계수는 compact array로 구성하고, solver 전달 후 즉시 해제하며, "
-            "세션에는 전체 해 벡터/LPModel이 아닌 요약과 양의 경로만 저장합니다. 지도와 ZIP은 요청할 때 한 개씩 생성합니다."
+            "Community Cloud 메모리 보호: 검증된 v7.2 제약 생성 경로를 유지하고, solver에 전달한 계수와 "
+            "전체 해 벡터/LPModel은 해 추출 직후 해제합니다. 세션에는 결과 요약과 양의 경로만 저장합니다."
         )
 
         b1, b2 = st.columns(2)
         with b1:
             if st.button("선택 조합 실행", type="primary", use_container_width=True):
+                case_key = (scenario_id, production_mode)
+                st.session_state.setdefault("xpress_results", {}).pop(case_key, None)
+                st.session_state.setdefault("xpress_errors", {}).pop(case_key, None)
                 with st.spinner("Xpress 구조의 연속 LP를 OR-Tools GLOP으로 계산하는 중입니다..."):
                     try:
                         res = solve_case(
                             tables, scenario_id, production_mode, cap_application, int(time_limit)
                         )
-                        st.session_state.setdefault("xpress_results", {})[(scenario_id, production_mode)] = res
+                        if res.get("status") not in {"OPTIMAL", "FEASIBLE"}:
+                            raise RuntimeError(res.get("message", res.get("status", "해를 생성하지 못했습니다.")))
+                        st.session_state.setdefault("xpress_results", {})[case_key] = res
                         st.session_state.pop("results_zip_bytes", None)
                         gc.collect()
                         st.success(f"{res['status']} · {res.get('wall_time_sec', 0):.2f}초")
                     except Exception as exc:
-                        st.exception(exc)
+                        st.session_state.setdefault("xpress_errors", {})[case_key] = str(exc)
+                        st.error(f"{SCENARIO_SHORT[scenario_id]} · {MODE_LABEL[production_mode]} 계산 실패: {exc}")
         with b2:
             if st.button("포스터 6개 조합 순차 실행", use_container_width=True):
                 progress = st.progress(0.0)
                 status_box = st.empty()
                 all_results = st.session_state.setdefault("xpress_results", {})
+                all_errors = st.session_state.setdefault("xpress_errors", {})
                 cases = [(s, m) for s in ["S1", "S2", "S3"] for m in ["line", "modular"]]
+
+                # Remove stale zero/error placeholders before recalculation.
+                for case_key in cases:
+                    all_results.pop(case_key, None)
+                    all_errors.pop(case_key, None)
+
+                completed = 0
                 for i, (s, m) in enumerate(cases, start=1):
                     status_box.write(f"{SCENARIO_SHORT[s]} · {MODE_LABEL[m]} 계산 중 ({i}/6)")
                     try:
-                        all_results[(s, m)] = solve_case(
+                        res = solve_case(
                             tables, s, m, cap_application, int(time_limit)
                         )
+                        if res.get("status") not in {"OPTIMAL", "FEASIBLE"}:
+                            raise RuntimeError(res.get("message", res.get("status", "해를 생성하지 못했습니다.")))
+                        all_results[(s, m)] = res
+                        completed += 1
                     except Exception as exc:
-                        all_results[(s, m)] = {"status": "ERROR", "message": str(exc)}
+                        all_errors[(s, m)] = str(exc)
                     st.session_state.pop("results_zip_bytes", None)
                     gc.collect()
                     progress.progress(i / len(cases))
-                status_box.success("6개 조합 계산이 완료되었습니다. 결과에는 전체 LP/해 벡터가 저장되지 않습니다.")
+
+                if completed == len(cases):
+                    status_box.success("6개 조합 계산이 완료되었습니다.")
+                else:
+                    status_box.error(f"{completed}/6개 조합만 완료되었습니다. 아래 오류 내용을 확인하세요.")
+                    with st.expander("실패한 조합과 오류 내용", expanded=True):
+                        for (s, m), message in all_errors.items():
+                            st.error(f"{SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: {message}")
 
         st.markdown("### 보조금 점수 민감도")
         with st.expander("선택 생산방식의 점수 민감도 실행", expanded=False):
@@ -1577,8 +1627,19 @@ def run_app():
     with tabs[2]:
         st.header("포스터형 최적화 결과")
         results = st.session_state.get("xpress_results", {})
-        if not results:
-            st.info("2번 탭에서 선택 조합 또는 6개 조합을 실행하세요.")
+        errors_by_case = st.session_state.get("xpress_errors", {})
+        if errors_by_case:
+            with st.expander("최근 계산 오류", expanded=False):
+                for (s, m), message in errors_by_case.items():
+                    st.error(f"{SCENARIO_SHORT[s]} · {MODE_LABEL[m]}: {message}")
+
+        valid_result_count = sum(
+            1 for value in results.values()
+            if value.get("status") in {"OPTIMAL", "FEASIBLE"}
+            and value.get("objective_value") is not None
+        )
+        if valid_result_count == 0:
+            st.info("2번 탭에서 선택 조합 또는 ‘포스터 6개 조합 순차 실행’을 실행하세요.")
         else:
             for scenario in ["S1", "S2", "S3"]:
                 render_poster_scenario(results, scenario)
@@ -1599,19 +1660,34 @@ def run_app():
             }
 
             if valid_results:
-                st.markdown("### 공급망 지도(요청 시 한 개만 생성)")
-                map_choice = st.selectbox(
-                    "지도 조합",
-                    list(valid_results.keys()),
-                    format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-                    key="lazy_map_choice",
-                )
-                if st.checkbox("선택한 공급망 지도 표시", value=False, key="show_one_map"):
-                    render_result_map(
-                        valid_results[map_choice],
-                        f"lazy_map_{map_choice[0]}_{map_choice[1]}",
-                        height=470,
+                comparable_scenarios = [
+                    scenario for scenario in ["S1", "S2", "S3"]
+                    if (scenario, "line") in valid_results and (scenario, "modular") in valid_results
+                ]
+                if comparable_scenarios:
+                    st.markdown("### 공급망 지도 비교")
+                    map_scenario = st.selectbox(
+                        "지도 시나리오",
+                        comparable_scenarios,
+                        format_func=lambda scenario: SCENARIO_SHORT[scenario],
+                        key="poster_map_scenario",
                     )
+                    if st.checkbox("선택한 시나리오의 라인·모듈 지도 표시", value=False, key="show_poster_maps"):
+                        map_c1, map_c2 = st.columns(2)
+                        with map_c1:
+                            st.markdown("#### 라인 생산 방식 부품 공급망")
+                            render_result_map(
+                                valid_results[(map_scenario, "line")],
+                                f"poster_map_{map_scenario}_line",
+                                height=470,
+                            )
+                        with map_c2:
+                            st.markdown("#### 모듈 활용 분산 생산 방식 부품 공급망")
+                            render_result_map(
+                                valid_results[(map_scenario, "modular")],
+                                f"poster_map_{map_scenario}_modular",
+                                height=470,
+                            )
 
                 st.markdown("### 결과 파일")
                 if st.button("전체 결과 ZIP 생성", key="build_results_zip"):
