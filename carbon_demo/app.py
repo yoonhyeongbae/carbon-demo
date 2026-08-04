@@ -1,4 +1,4 @@
-# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_0
+# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_7
 from __future__ import annotations
 
 import gc
@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-lp-memory-safe-v8.6"
-APP_PACKAGE_ID = "20260804-pdf-route-v8.6"
+APP_BUILD = "pdf-country-route-battery-stage-ui-v8.7"
+APP_PACKAGE_ID = "20260804-v8.7-explained-tables-all-maps"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -1669,6 +1669,124 @@ def results_zip(results: Mapping[Tuple[str, str], Dict]) -> bytes:
 
 
 # -----------------------------------------------------------------------------
+# Reusable explanatory UI helpers
+# -----------------------------------------------------------------------------
+def apply_global_font_scale() -> None:
+    """Increase the visible SaaS typography by approximately 2 pt."""
+    st.markdown(
+        """
+        <style>
+        html, body, [class*="css"] { font-size: 18px; }
+        .stMarkdown, .stDataFrame, .stSelectbox, .stNumberInput, .stTextInput,
+        .stButton, .stCheckbox, .stRadio, .stMetric { font-size: 18px !important; }
+        h1 { font-size: 2.7rem !important; }
+        h2 { font-size: 2.15rem !important; }
+        h3 { font-size: 1.75rem !important; }
+        h4 { font-size: 1.35rem !important; }
+        div[data-testid="stMetricValue"] { font-size: 2.15rem !important; }
+        div[data-testid="stMetricLabel"] { font-size: 1.05rem !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def explain_table(
+    title: str,
+    row_meaning: str,
+    column_meanings: Mapping[str, str],
+    value_meaning: str,
+) -> None:
+    """Attach an explanation for the rows, columns and values of a table."""
+    with st.expander(f"{title}: 행·열·값 읽는 방법", expanded=False):
+        st.markdown(f"**행의 의미**: {row_meaning}")
+        st.markdown("**열의 의미**")
+        for name, meaning in column_meanings.items():
+            st.markdown(f"- `{name}`: {meaning}")
+        st.markdown(f"**값의 의미**: {value_meaning}")
+
+
+def show_explained_dataframe(
+    df: pd.DataFrame,
+    title: str,
+    row_meaning: str,
+    column_meanings: Optional[Mapping[str, str]] = None,
+    value_meaning: str = "각 값은 해당 행의 대상과 열의 지표가 만나는 실제 입력값 또는 최적화 결과값입니다.",
+) -> None:
+    st.dataframe(df, hide_index=True, use_container_width=True)
+    meanings = dict(column_meanings or {str(c): f"{c} 항목" for c in df.columns})
+    explain_table(title, row_meaning, meanings, value_meaning)
+
+
+def render_formula_table(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[object]],
+    formula_columns: Sequence[int],
+    row_explanation: str,
+    value_explanation: str,
+) -> None:
+    """Render table-like rows while displaying formula cells with st.latex."""
+    st.markdown(f"#### {title}")
+    widths = [1.25] * len(headers)
+    header_cols = st.columns(widths)
+    for col, header in zip(header_cols, headers):
+        col.markdown(f"**{header}**")
+    st.divider()
+    formula_set = set(formula_columns)
+    for row in rows:
+        cols = st.columns(widths)
+        for idx, (col, value) in enumerate(zip(cols, row)):
+            if idx in formula_set and str(value).strip():
+                col.latex(str(value))
+            else:
+                col.markdown(str(value))
+        st.divider()
+    explain_table(
+        title,
+        row_explanation,
+        {h: f"{h} 열의 정의와 해석" for h in headers},
+        value_explanation,
+    )
+
+
+def render_map_legend_outside() -> None:
+    """Render a readable legend outside Folium maps."""
+    st.markdown("#### 공급망 지도 범례")
+    st.markdown(
+        """
+        <div style="background:#fff;border:1px solid #aaa;border-radius:10px;padding:15px 18px;line-height:1.9;">
+          <div><b>선 색상 = 운송되는 대상</b>&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:7px solid #e41a1c;vertical-align:middle;"></span> 철강&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:7px solid #ff9f1c;vertical-align:middle;"></span> 알루미늄&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:7px solid #238b45;vertical-align:middle;"></span> 기타 원자재&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:7px solid #2171b5;vertical-align:middle;"></span> 배터리/모듈&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:7px solid #6a3d9a;vertical-align:middle;"></span> 완제품 차량
+          </div>
+          <div><b>선 모양 = 운송경로</b>&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:4px solid #555;vertical-align:middle;"></span> 도로&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:4px dashed #555;vertical-align:middle;"></span> 철도&nbsp;&nbsp;
+            <span style="display:inline-block;width:38px;border-top:4px dotted #555;vertical-align:middle;"></span> 해상/항공 포함 복합운송
+          </div>
+          <div><b>선 굵기 = 운송량 사분위수</b>&nbsp;&nbsp;
+            <span style="display:inline-block;width:34px;border-top:2.5px solid #333;vertical-align:middle;"></span> Q1&nbsp;&nbsp;
+            <span style="display:inline-block;width:34px;border-top:5px solid #333;vertical-align:middle;"></span> Q2&nbsp;&nbsp;
+            <span style="display:inline-block;width:34px;border-top:8px solid #333;vertical-align:middle;"></span> Q3&nbsp;&nbsp;
+            <span style="display:inline-block;width:34px;border-top:11px solid #333;vertical-align:middle;"></span> Q4
+          </div>
+          <div><b>지도 기호</b>&nbsp;&nbsp; 🔵 파란 원 = 재질·배터리 생산/공급 위치&nbsp;&nbsp;
+            🟢 초록 원 = 차량 또는 배터리팩 조립 위치&nbsp;&nbsp; 🛒 주황 아이콘 = 프랑스 수요시장</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "해상+도로는 생산지→출발항의 도로, 국제 해상운송, 도착항→조립지의 도로를 하나의 복합경로로 합산한 것입니다. "
+        "예: 한국 모듈 공장→부산항(도로)→유럽 항만(해상)→독일 조립지(도로). 항공+철도도 같은 방식으로 국제 항공구간과 내륙 철도구간을 합친 경로입니다. "
+        "지도 선은 전체 복합경로를 하나의 곡선으로 표시하며 실제 도로·항로의 정확한 형상은 아닙니다."
+    )
+
+# -----------------------------------------------------------------------------
 # Mapping and charts
 # -----------------------------------------------------------------------------
 def _bezier_curve_points(start: Tuple[float, float], end: Tuple[float, float], bend: float, steps: int = 30):
@@ -1815,30 +1933,6 @@ def build_supply_map(result: Dict, height: int = 620):
                 ),
             ).add_to(supply_map)
 
-    legend = """
-    <div style="position: fixed; bottom: 26px; left: 26px; z-index:9999; background:rgba(255,255,255,0.97);
-                border:2px solid #555; border-radius:10px; padding:15px 17px; font-size:15px;
-                line-height:1.55; min-width:430px; box-shadow:0 2px 8px rgba(0,0,0,0.25);">
-      <div style="font-size:17px; font-weight:700; margin-bottom:7px;">공급망 지도 범례</div>
-      <div style="font-weight:700; margin-bottom:3px;">1. 선 색상 = 운송되는 대상</div>
-      <div><span style="display:inline-block;width:42px;border-top:7px solid #e41a1c;vertical-align:middle;"></span> 철강</div>
-      <div><span style="display:inline-block;width:42px;border-top:7px solid #ff9f1c;vertical-align:middle;"></span> 알루미늄</div>
-      <div><span style="display:inline-block;width:42px;border-top:7px solid #238b45;vertical-align:middle;"></span> 기타 원자재</div>
-      <div><span style="display:inline-block;width:42px;border-top:7px solid #2171b5;vertical-align:middle;"></span> 배터리/모듈</div>
-      <div><span style="display:inline-block;width:42px;border-top:7px solid #6a3d9a;vertical-align:middle;"></span> 완제품 차량</div>
-      <div style="font-weight:700; margin-top:8px; margin-bottom:3px;">2. 선 모양 = 운송경로</div>
-      <div><span style="display:inline-block;width:46px;border-top:4px solid #555;vertical-align:middle;"></span> 도로</div>
-      <div><span style="display:inline-block;width:46px;border-top:4px dashed #555;vertical-align:middle;"></span> 철도</div>
-      <div>해상+도로 / 해상+철도 / 항공+도로 / 항공+철도는 서로 다른 점선 패턴이며, 마우스를 올리면 정확한 경로명이 표시됩니다.</div>
-      <div style="font-weight:700; margin-top:8px; margin-bottom:3px;">3. 선 굵기 = 운송량 사분위수</div>
-      <div><span style="display:inline-block;width:34px;border-top:2.5px solid #333;vertical-align:middle;"></span> Q1
-      &nbsp; <span style="display:inline-block;width:34px;border-top:5px solid #333;vertical-align:middle;"></span> Q2
-      &nbsp; <span style="display:inline-block;width:34px;border-top:8px solid #333;vertical-align:middle;"></span> Q3
-      &nbsp; <span style="display:inline-block;width:34px;border-top:11px solid #333;vertical-align:middle;"></span> Q4</div>
-      <div style="font-size:13px;color:#555;margin-top:7px;">곡선은 실제 도로 형상이 아니라 겹치는 공급망 선을 분리하기 위한 시각화입니다.</div>
-    </div>
-    """
-    supply_map.get_root().html.add_child(folium.Element(legend))
     return supply_map
 
 
@@ -1854,6 +1948,24 @@ def cost_ratio_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFram
                 "line_cost": line["objective_value"],
                 "modular_cost": modular["objective_value"],
                 "modular_to_line_cost_ratio": modular["objective_value"] / line["objective_value"],
+            })
+    return pd.DataFrame(rows)
+
+
+def emissions_comparison_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFrame:
+    rows=[]
+    for scenario_id in ["S1","S2","S3"]:
+        line=results.get((scenario_id,"line"),{})
+        modular=results.get((scenario_id,"modular"),{})
+        if line.get("status") in {"OPTIMAL","FEASIBLE"} and modular.get("status") in {"OPTIMAL","FEASIBLE"}:
+            line_e=float(line.get("total_emissions_kgco2",0.0))
+            mod_e=float(modular.get("total_emissions_kgco2",0.0))
+            rows.append({
+                "scenario_id":scenario_id,
+                "scenario_name":SCENARIO_SHORT[scenario_id],
+                "line_emissions_kgco2":line_e,
+                "modular_emissions_kgco2":mod_e,
+                "modular_to_line_emissions_ratio":mod_e/line_e if line_e else np.nan,
             })
     return pd.DataFrame(rows)
 
@@ -1886,38 +1998,17 @@ def render_result_map(result: Dict, key: str, height: int = 650):
     del supply_map
     gc.collect()
 
-    st.markdown("#### 지도 라벨과 선을 읽는 방법")
-    map_guide = pd.DataFrame([
-        ["선 색상", "무엇을 운송하는지 표시", "빨강=철강, 주황=알루미늄, 초록=기타 원자재, 파랑=배터리/모듈, 보라=완제품"],
-        ["선 모양", "어떤 운송경로를 사용하는지 표시", "실선/점선 패턴으로 도로, 철도, 해상+도로, 해상+철도, 항공+도로, 항공+철도를 구분"],
-        ["선 굵기", "해당 경로의 상대적 운송량", "Q1이 가장 얇고 Q4가 가장 굵음"],
-        ["곡선 방향", "겹침을 줄이기 위한 화면 표현", "실제 도로나 항로의 정확한 곡선을 뜻하지 않음"],
-        ["마우스 툴팁", "경로 상세정보", "재질, 출발지, 도착지, 운송경로, 물량, Q구간 확인"],
-    ], columns=["지도 요소", "뜻", "직관적 해석"])
-    st.dataframe(map_guide, hide_index=True, use_container_width=True)
-
-    st.markdown("#### 해상+육상·항공+육상의 의미")
-    st.markdown(
-        "지도에는 하나의 곡선으로 보이지만, 코드에서는 **여러 구간을 합친 하나의 복합경로 대안**입니다. "
-        "국제 주운송과 출발·도착 국가의 내륙운송을 하나의 비용·배출계수로 합산합니다."
-    )
-    route_examples = pd.DataFrame([
-        ["해상+도로", "한국 모듈 공장 → 출발항(도로) → 프랑스 항만(해상) → 프랑스/유럽 조립지(도로)"],
-        ["해상+철도", "중국 모듈 공장 → 출발항(철도) → 유럽 항만(해상) → 독일 조립지(철도)"],
-        ["항공+도로", "일본 긴급부품 공장 → 공항(도로) → 파리 공항(항공) → 프랑스 조립지(도로)"],
-        ["항공+철도", "미국 모듈 공장 → 공항(철도/내륙구간) → 유럽 공항(항공) → 조립지(철도)"],
-    ], columns=["복합경로", "한 개 선이 대표하는 실제 구간 예시"])
-    st.dataframe(route_examples, hide_index=True, use_container_width=True)
-    st.caption(
-        f"현재 단순화에서는 국제 복합경로의 출발·도착 내륙구간을 각각 {INTERNATIONAL_INLAND_LEG_KM:g} km로 두고, "
-        "나머지 거리를 해상 또는 항공 주구간으로 계산합니다. 정확한 항만·공항별 실제 경로 데이터가 추가되면 이 부분을 교체할 수 있습니다."
-    )
 
 
 def render_solver_metrics(result: Dict):
     status = str(result.get("status", "NOT_RUN"))
     if status not in {"OPTIMAL", "FEASIBLE"}:
         st.error(f"{status}: {result.get('message', '해를 찾지 못했습니다.')}")
+        if status == "INFEASIBLE":
+            st.caption(
+                "INFEASIBLE은 변수·제약조건 수가 많아서 계산능력을 넘었다는 뜻이 아니라, 현재 입력값과 모든 제약조건을 동시에 만족하는 해가 없다고 solver가 판정했다는 뜻입니다. "
+                "계산시간 초과나 수행 실패라면 보통 NOT_SOLVED, ABNORMAL 또는 시간제한 상태가 표시됩니다. S1·S2가 같은 규모에서 계산되고 S3만 실패한다면 강화된 탄소상한이 원인일 가능성이 높습니다."
+            )
         diagnosis = result.get("feasibility_diagnosis")
         if isinstance(diagnosis, dict) and diagnosis.get("status") == "DIAGNOSED":
             st.caption(
@@ -1963,7 +2054,11 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
         if col in qtable:
             qtable[col] = qtable[col].map(lambda v: f"{v:.2f}%" if pd.notna(v) else "-")
     st.markdown("#### 부품 운송량 사분위수 비율")
-    st.dataframe(qtable, hide_index=True, use_container_width=True)
+    show_explained_dataframe(
+        qtable, f"{SCENARIO_SHORT[scenario_id]} 사분위수 비율",
+        "Q1~Q4 각 행은 양의 부품 운송경로를 물량 크기로 4등분한 구간입니다.",
+        value_meaning="각 생산방식 열의 값은 전체 부품 운송량 중 해당 Q구간이 차지하는 백분율입니다. Q4가 가장 큰 개별 흐름들입니다.",
+    )
 
     if line.get("objective_value") and modular.get("objective_value"):
         ratio = modular["objective_value"] / line["objective_value"]
@@ -1971,119 +2066,86 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
 
 
 def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
-    st.header("이 SaaS가 하는 일")
+    st.header("전기자동차 공급망·탄소 최적화 SaaS 개요")
     st.markdown(
         """
-이 앱은 **프랑스 전기차 보조금 탄소기준**과 **공급망 최적화**를 함께 다루는
-**탄소·비용 기반 공급망 의사결정 SaaS 프로토타입**입니다.
-
-사용자는 제품, 수요, 국가별 재질·배터리 생산계수, 조립계수, 생산용량과 허용 운송수단을 입력합니다.
-앱은 **라인 생산 방식**과 **모듈 활용 분산 생산 방식**에 대해 생산지·조립지·운송경로·물량을 계산하고,
-총비용·총탄소배출량·탄소상한 만족 여부를 비교합니다.
+이 SaaS는 여러 국가에서 **소형·중형·대형 전기자동차의 미드·롱 트림**을 생산하여 프랑스 시장의 제품별 수요를 정확히 충족하도록
+국가별 재질 생산량, 배터리 또는 모듈 생산량, 조립량, 운송경로별 물량을 결정합니다.
+기업이 차량 종류별 프랑스 보조금 탄소기준을 충족할 수 있도록 생산·운송·조립·완제품 운송에서 발생하는 탄소배출량도 함께 계산하고,
+시나리오 ①과 ③에서는 탄소배출량 상한을 제약조건으로 적용합니다. 목적함수는 주어진 수요와 탄소조건을 만족하는 공급망 중 **총비용이 가장 낮은 구조**를 찾는 것입니다.
         """
     )
 
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### 1) 입력 데이터")
         input_df = pd.DataFrame([
-            ["제품", "차량 6종의 질량, 배터리 용량, 차급, 재질 필요량"],
-            ["수요", "프랑스 시장의 제품별 수요"],
-            ["공급지", "국가별 철강·알루미늄·기타·배터리/모듈 생산비, 배출계수, 용량"],
-            ["조립지", "국가별 차체·배터리팩 조립비와 조립배출계수"],
-            ["운송", "국가별 허용 운송수단, 거리, 경로별 비용·배출계수"],
-            ["시나리오", "현행 기준(S1), 탄소상한 없음(S2), 강화 기준(S3)"],
-        ], columns=["입력 항목", "설명"])
-        st.dataframe(input_df, hide_index=True, use_container_width=True)
+            ["제품·수요", "차량 종류/트림, 차량질량, 배터리용량, 재질소요량, 프랑스 수요량"],
+            ["국가별 생산", "철강·알루미늄·기타 원자재·배터리/모듈 생산비, 생산배출계수, 생산용량"],
+            ["국가별 조립", "차체 및 배터리팩 조립비와 조립배출계수"],
+            ["운송", "국가별 허용수단, 도로·철도·해상·항공 비용/배출계수, 거리"],
+            ["정책 시나리오", "보조금 점수에 대응하는 차량 1대당 탄소상한"],
+        ], columns=["Input", "사용자가 입력하거나 CSV에서 불러오는 값"])
+        st.markdown("### Input")
+        show_explained_dataframe(input_df, "Input 표", "각 행은 최적화에 필요한 입력 데이터 그룹입니다.", value_meaning="오른쪽 값은 해당 입력 그룹에 포함되는 구체적인 필드입니다.")
     with c2:
-        st.markdown("### 2) 주요 출력")
         output_df = pd.DataFrame([
-            ["총비용", "생산 + 부품/모듈 운송 + 차체/팩 조립 + 완제품 운송"],
-            ["총탄소배출량", "생산 + 부품/모듈 운송 + 차체/팩 조립 + 완제품 운송"],
-            ["공급망 구조", "어느 국가에서 생산하고 어느 조립지로 얼마나 보내는지"],
-            ["차량별 결과", "kg CO₂-eq/대, 점수, 탄소상한 만족 여부"],
-            ["지도", "재질 색상, 운송경로 점선, Q1~Q4 굵기"],
-            ["생산방식 비교", "라인의 동일위치 생산과 모듈의 분산생산 차이"],
-        ], columns=["출력 항목", "설명"])
-        st.dataframe(output_df, hide_index=True, use_container_width=True)
+            ["최적 물량", "국가별 RP·RT·FP·FT와 배터리 모듈/팩 수량"],
+            ["비용", "생산비·부품운송비·조립비·팩조립비·완제품운송비"],
+            ["탄소배출량", "생산·유입운송·차체조립·팩조립·완제품운송"],
+            ["정책 결과", "차량별/차급별 탄소상한 만족 여부와 보조금 점수"],
+            ["공급망 시각화", "선 색상·모양·굵기로 표현한 모든 계산 조합의 지도"],
+        ], columns=["Output", "SaaS가 계산하여 제공하는 결과"])
+        st.markdown("### Output")
+        show_explained_dataframe(output_df, "Output 표", "각 행은 SaaS가 출력하는 결과 그룹입니다.", value_meaning="오른쪽 값은 해당 결과가 포함하는 세부 지표입니다.")
 
-    st.markdown("### 3) 최적화 프레임워크")
-    framework_df = pd.DataFrame([
-        [1, "입력 데이터 검증", "제품·수요·공급지·조립지·운송·시나리오 자료를 확인합니다."],
-        [2, "가능 경로 생성", "국가별 허용수단으로 직접/복합 운송경로를 만듭니다."],
-        [3, "생산방식 구조 설정", "라인은 배터리 생산지=차량 조립지, 모듈은 생산지와 팩 조립지가 달라도 되도록 설정합니다."],
-        [4, "LP 모형 구성", "생산량, 운송량, 조립량, 수요, 용량, 탄소상한 식을 생성합니다."],
-        [5, "최적화", "OR-Tools가 총비용 최소 물량배분을 계산합니다."],
-        [6, "결과 해석", "비용·탄소·공급망 지도·차량별 상한 결과를 제공합니다."],
-    ], columns=["단계", "모듈", "사용자가 이해할 수 있는 역할"])
-    st.dataframe(framework_df, hide_index=True, use_container_width=True)
-
-    st.markdown("### 4) 코드 기반 라인 생산 방식: 배터리 생산과 차량 조립의 동일위치 구조")
+    st.markdown("### 수학적 최적화 프레임워크의 일반적인 큰틀")
     st.markdown(
-        "라인 생산에서는 **완성 배터리팩을 생산하는 위치와 그 팩을 차량에 결합하는 조립지의 위치가 반드시 같습니다.** "
-        "따라서 배터리는 국가 간 운송되지 않고, 같은 위치 안에서 내부 이동되는 것으로 모델링합니다."
+        """
+1. **대안 정의**: 어떤 국가가 재질·배터리/모듈을 생산하고, 어떤 국가가 차량과 배터리팩을 조립할 수 있는지를 후보로 둡니다.  
+2. **의사결정변수 설정**: 국가별 생산량, 공급지→조립지 운송량, 조립량, 조립지→프랑스 출하량을 변수로 둡니다.  
+3. **목적함수 설정**: 모든 생산·운송·조립 비용의 합을 최소화합니다.  
+4. **물량수지와 수요 제약**: 생산량과 출고량, 조립지 유입량과 필요량, 조립량과 출하량을 일치시키고 프랑스 수요를 정확히 충족합니다.  
+5. **운영 제약**: 국가별 생산용량과 허용 운송경로를 반영합니다.  
+6. **환경·정책 제약**: 차량 종류별 생산·운송·조립 탄소배출량을 합산하고 시나리오의 탄소상한을 만족시킵니다.  
+7. **최적해 해석**: 비용, 탄소, 국가별 물량, 공급망 경로와 생산방식 차이를 비교합니다.
+        """
     )
-    line_stages = pd.DataFrame([
-        ["Stage 1", "비배터리 재질 생산", "여러 국가 공급지에서 철강·알루미늄·기타 원자재를 생산합니다.", "RP(steel/aluminum/other)"],
-        ["Stage 2", "완성 배터리팩 생산", "차량을 조립할 바로 그 국가/위치 p에서 B_f kWh 완성팩을 생산합니다. 즉 배터리 공급지 s와 조립지 p는 s=p입니다.", "RP(battery), ZL의 대각원소"],
-        ["Stage 3", "비배터리 부품 운송", "철강·알루미늄·기타 원자재를 허용된 경로로 조립지 p에 보냅니다.", "RT(비배터리)"],
-        ["Stage 4", "같은 위치의 내부 배터리 이동", "완성팩은 같은 위치에서 차량 조립공정으로 이동합니다. 국제/국가 간 배터리 운송비와 배출량은 0입니다.", "RT(battery,p,p,internal)"],
-        ["Stage 5", "차체 조립·팩 결합·차량 완성", "비배터리 차체를 조립하고 동일 위치에서 생산된 완성팩을 차량에 결합합니다.", "FP, ZL=FP"],
-        ["Stage 6", "프랑스 시장 출하", "완성차를 프랑스로 운송하며 제품별 총 출하량은 수요와 정확히 같습니다.", "FT, 수요등식"],
-    ], columns=["단계", "공정 이름", "직관적 설명", "관련 코드 변수"])
-    st.dataframe(line_stages, hide_index=True, use_container_width=True)
-    st.markdown(r"""
-**머릿속 흐름**  
-비배터리 재질 생산 → 재질 운송 → **조립지와 같은 위치에서 완성팩 생산** → 차체·팩 결합 → 프랑스 출하
 
-\[
-RT_{f,bat,s,p,k}=0\quad(s
-e p),
-\qquad RT_{f,bat,p,p,k_0}=B_fZL_{fpp},
-\qquad ZL_{fpp}=FP_{fp}.
-\]
-""")
-
-    st.markdown("### 5) 코드 기반 모듈 활용 분산 생산 방식: 모듈 생산지와 팩 조립지의 분리")
+    st.markdown("### 라인 생산 방식: 3개 Stage")
     st.markdown(
-        "모듈 생산에서는 배터리를 완성팩 상태로 보내지 않습니다. **10 kWh 모듈과 5 kWh 모듈을 국가 s에서 생산하고, "
-        "다른 국가의 조립지 p로 운송한 뒤 p에서 50/60/70/80/90/100 kWh 완성팩을 조립**할 수 있습니다."
+        "각 Stage의 국가 후보는 고정된 한 국가가 아니라 CSV에 포함된 할당 가능한 국가들입니다. 최적화가 비용·탄소·용량·운송조건을 보고 국가별 물량을 배분합니다."
     )
-    modular_stages = pd.DataFrame([
-        ["Stage 1", "10/5 kWh 모듈 생산", "국가 s에서 10 kWh 메인 모듈 ZM과 5 kWh 보조 모듈 ZS를 생산합니다. 같은 생산국가에서는 모듈 크기와 무관하게 동일한 kg CO₂-eq/kWh 계수를 사용합니다.", "RP(battery), ZM, ZS"],
-        ["Stage 2", "모듈 분산 운송", "모듈 생산지 s와 팩 조립지 p가 달라도 되며, 허용된 경로로 모듈 kWh를 운송합니다.", "RT(battery,s,p,k)"],
-        ["Stage 3", "조립지에서 완성팩 구성", "조립지 p에 들어온 모든 모듈의 kWh 합이 차량별 B_f×FP와 같아지도록 50~100 kWh 완성팩을 조립합니다.", "sum RT(battery)=B_f FP"],
-        ["Stage 4", "비배터리 재질 공급·차체 조립", "철강·알루미늄·기타 원자재를 운송하여 비배터리 차체를 조립합니다.", "RT(비배터리), FP"],
-        ["Stage 5", "팩·차체 통합", "p에서 조립된 완성팩과 비배터리 차체를 결합합니다. 모듈 팩 조립의 비용·배출은 p 국가의 조립계수를 적용합니다.", "FP의 모듈 팩 조립항"],
-        ["Stage 6", "프랑스 시장 출하", "완성차를 프랑스로 운송하며 제품별 출하량은 수요와 같습니다.", "FT, 수요등식"],
-    ], columns=["단계", "공정 이름", "직관적 설명", "관련 코드 변수"])
-    st.dataframe(modular_stages, hide_index=True, use_container_width=True)
-    st.markdown(r"""
-**머릿속 흐름**  
-국가 s에서 10/5 kWh 모듈 생산 → 다른 국가 p로 모듈 운송 가능 → p에서 차량별 완성팩 조립 → 차체와 결합 → 프랑스 출하
-
-\[
-\sum_kRT_{f,bat,s,p,k}=10ZM_{fsp}+5ZS_{fsp},
-\qquad
-\sum_{s,k}RT_{f,bat,s,p,k}=B_fFP_{fp}.
-\]
-""")
-
-    st.markdown("### 6) 두 방식의 핵심 차이")
-    comparison = pd.DataFrame([
-        ["배터리 생산물", "완성 배터리팩", "10 kWh/5 kWh 모듈"],
-        ["배터리 생산지와 조립지", "반드시 동일(s=p)", "달라도 됨(s와 p 독립)"],
-        ["배터리 국제운송", "없음; 동일 위치 내부이동", "모듈 상태로 가능"],
-        ["완성팩 조립 위치", "배터리 생산·차량 조립과 동일 위치", "차량 조립지 p"],
-        ["배터리 생산 배출계수", "동일 위치 국가의 배터리 EF", "모듈 생산국가 s의 배터리 EF"],
-        ["모듈→팩 조립 배출계수", "별도 추가 없음; 완성팩 생산에 포함", "팩 조립국가 p의 조립 EF를 적용하는 사용자 확장"],
-        ["변수종류", "연속 LP", "연속 LP"],
-    ], columns=["비교항목", "라인 생산", "모듈 활용 분산 생산"])
-    st.dataframe(comparison, hide_index=True, use_container_width=True)
-    st.warning(
-        "PDF는 배터리 탄소발자국을 kWh×국가별 배터리 배출계수로 제시하지만, 모듈을 완성팩으로 조립하는 별도 계수는 제공하지 않습니다. "
-        "따라서 모듈 방식의 팩 조립항은 사용자의 새 공정구조를 반영하기 위해 조립지 국가의 기존 조립계수를 적용한 확장 가정입니다."
+    line_stages=pd.DataFrame([
+        ["Stage 1", "재질 생산", "철강, 알루미늄, 철강·알루미늄·배터리를 제외한 기타 원자재를 여러 국가에서 생산", "RP, RT"],
+        ["Stage 2", "차량·배터리팩 조립", "Stage 1 재질을 조립하고, 같은 위치에서 완성 배터리팩을 생산·결합하여 전기자동차를 완성", "FP, ZL, battery RP/RT"],
+        ["Stage 3", "프랑스 시장", "완성 전기자동차를 프랑스로 보내 제품별 수요를 정확히 충족", "FT, 수요등식"],
+    ],columns=["단계","Stage의 역할","사용자가 머릿속에 그릴 공정","관련 코드 변수"])
+    show_explained_dataframe(line_stages,"라인 생산 Stage 표","각 행은 원재료 생산부터 프랑스 수요 충족까지의 공급망 Stage입니다.",value_meaning="각 셀은 Stage의 공정 역할과 이를 표현하는 코드 변수를 뜻합니다.")
+    st.info(
+        "현재 코드 구현과 일치합니다. 라인 방식은 배터리 생산지와 차량 조립지의 인덱스를 같게 강제하고(s=p), 완성팩의 국가 간 운송을 허용하지 않습니다. "
+        "다만 Stage 2는 실제 공장 내부의 세부 순서를 따로 시뮬레이션하지 않고, 배터리 생산수지와 차량 조립수지를 결합한 네트워크 제약으로 표현합니다."
     )
+
+    st.markdown("### 모듈 활용 분산 생산 방식: 3개 Stage")
+    modular_stages=pd.DataFrame([
+        ["Stage 1", "재질·모듈 생산", "철강, 알루미늄, 기타 원자재와 10kWh·5kWh 배터리 모듈을 여러 국가에서 생산", "RP, ZM, ZS, RT"],
+        ["Stage 2", "차량·배터리팩 조립", "비배터리 재질을 조립하고 여러 생산국가에서 받은 모듈을 완성 배터리팩으로 조립한 뒤 전기자동차에 결합", "FP, battery RT"],
+        ["Stage 3", "프랑스 시장", "완성 전기자동차를 프랑스로 보내 제품별 수요를 정확히 충족", "FT, 수요등식"],
+    ],columns=["단계","Stage의 역할","사용자가 머릿속에 그릴 공정","관련 코드 변수"])
+    show_explained_dataframe(modular_stages,"모듈 분산 생산 Stage 표","각 행은 모듈 생산부터 프랑스 수요 충족까지의 공급망 Stage입니다.",value_meaning="Stage 1의 모듈 생산국가와 Stage 2의 팩 조립국가는 서로 달라도 됩니다.")
+    st.info(
+        "현재 코드 구현과 일치합니다. 모듈 방식은 s와 p를 독립적으로 허용하고, 10/5kWh 모듈의 생산·운송수지와 p에서의 차량별 완성팩 용량 충족식을 적용합니다. "
+        "또한 현재 코드에서는 모듈→팩 조립 배출량을 배터리팩이 실제로 조립되는 국가 p의 `assembly_ef_kgco2_per_kg`에 배터리 질량을 곱해 계산합니다."
+    )
+
+    comparison=pd.DataFrame([
+        ["Stage 1의 배터리 형태", "완성팩을 Stage 2 위치에서 생산", "10/5kWh 모듈을 여러 국가에서 생산"],
+        ["Stage 1과 Stage 2 국가", "배터리는 동일 위치(s=p)", "모듈 생산국가 s와 팩 조립국가 p가 달라도 됨"],
+        ["배터리 국제운송", "완성팩 국제운송 없음", "모듈 상태 국제운송 가능"],
+        ["팩 조립 배출계수", "별도 팩 조립 확장항 없음", "팩 조립국가 p의 국가별 조립 EF 적용"],
+    ],columns=["핵심차이","라인 생산","모듈 활용 분산 생산"])
+    st.markdown("### 두 방식의 핵심차이")
+    show_explained_dataframe(comparison,"생산방식 비교 표","각 행은 두 생산방식을 구분하는 하나의 구조적 기준입니다.",value_meaning="라인과 모듈 열의 값은 동일 기준에 대한 각 방식의 구현 차이입니다.")
 
 
 def run_app():
@@ -2092,6 +2154,7 @@ def run_app():
         page_icon="🚗",
         layout="wide",
     )
+    apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
     st.caption(
         f"build: {APP_BUILD} · package: {APP_PACKAGE_ID} · "
@@ -2158,10 +2221,26 @@ def run_app():
             "scenarios.csv": "시나리오",
             "xpress_model_metadata.csv": "모형 상수·가정",
         }
+        table_guides = {
+            "products.csv": ("각 행은 하나의 차량 트림입니다.", "값은 트림별 질량·배터리용량·재질소요량입니다."),
+            "demand.csv": ("각 행은 제품-시장 수요 조합입니다.", "demand_units는 프랑스가 요구하는 차량 대수입니다."),
+            "raw_material_suppliers.csv": ("각 행은 재질-공급국가 조합입니다.", "생산비·국가별 생산EF·용량 값이 해당 조합에 적용됩니다."),
+            "assembly_locations.csv": ("각 행은 하나의 조립 후보국가/위치입니다.", "조립비와 조립EF는 그 위치에서 조립되는 질량에 적용됩니다."),
+            "transport_parameters.csv": ("각 행은 운송수단-지역 조합입니다.", "비용과 EF는 kg·km 단위 운송에 적용됩니다."),
+            "country_transport_rules.csv": ("각 행은 국가별 운송수단 허용규칙입니다.", "0은 불허, 1은 허용이며 최적화변수가 아닌 고정 입력입니다."),
+            "material_parameters.csv": ("각 행은 하나의 재질입니다.", "loss_rate는 순사용량에서 총생산량으로 환산할 때 사용합니다."),
+            "markets.csv": ("각 행은 최종 수요시장입니다.", "위도·경도와 최소거리 값은 완제품 운송거리에 사용됩니다."),
+            "scenarios.csv": ("각 행은 하나의 정책 시나리오입니다.", "점수와 차급별 kg CO₂-eq/대 상한이 최적화 제약에 사용됩니다."),
+            "xpress_model_metadata.csv": ("각 행은 모형의 상수 또는 가정입니다.", "값은 모형 크기·인덱스·기준 설정을 설명합니다."),
+        }
         subtabs = st.tabs(list(display_names.values()))
         for sub, filename in zip(subtabs, display_names):
             with sub:
-                st.dataframe(tables[filename], use_container_width=True, hide_index=True)
+                row_guide, value_guide = table_guides[filename]
+                show_explained_dataframe(
+                    tables[filename], display_names[filename], row_guide,
+                    value_meaning=value_guide,
+                )
 
     with tabs[2]:
         st.header("최적화 실행")
@@ -2263,7 +2342,7 @@ def run_app():
         st.header("포스터형 최적화 결과")
         results = st.session_state.get("xpress_results", {})
         if not results:
-            st.info("2번 탭에서 선택 조합 또는 6개 조합을 실행하세요.")
+            st.info("3번 탭에서 선택 조합 또는 6개 조합을 실행하세요.")
         else:
             for scenario in ["S1", "S2", "S3"]:
                 render_poster_scenario(results, scenario)
@@ -2271,12 +2350,25 @@ def run_app():
 
             st.markdown("### 분석 및 결론")
             ratio_df = cost_ratio_dataframe(results)
+            emission_df = emissions_comparison_dataframe(results)
             if not ratio_df.empty:
-                st.bar_chart(
-                    ratio_df.set_index("scenario_name")[["modular_to_line_cost_ratio"]],
-                    use_container_width=True,
+                st.markdown("#### 시나리오별 총비용 비교")
+                cost_chart = ratio_df.set_index("scenario_name")[["line_cost", "modular_cost"]]
+                st.bar_chart(cost_chart, use_container_width=True)
+                show_explained_dataframe(
+                    ratio_df, "비용 비교 결과",
+                    "각 행은 하나의 정책 시나리오입니다.",
+                    value_meaning="line_cost와 modular_cost는 생산방식별 총비용이며, 비율이 1보다 작으면 모듈 방식 비용이 더 낮습니다.",
                 )
-                st.dataframe(ratio_df, hide_index=True, use_container_width=True)
+            if not emission_df.empty:
+                st.markdown("#### 시나리오별 총탄소배출량 비교")
+                emission_chart = emission_df.set_index("scenario_name")[["line_emissions_kgco2", "modular_emissions_kgco2"]]
+                st.bar_chart(emission_chart, use_container_width=True)
+                show_explained_dataframe(
+                    emission_df, "탄소배출량 비교 결과",
+                    "각 행은 두 생산방식 모두 feasible 해를 가진 하나의 시나리오입니다.",
+                    value_meaning="배출량은 공급망 전체 kg CO₂-eq이며, 비율이 1보다 작으면 모듈 방식 배출량이 더 낮습니다.",
+                )
 
             valid_results = {
                 key: value for key, value in results.items()
@@ -2284,20 +2376,22 @@ def run_app():
             }
 
             if valid_results:
-                st.markdown("### 공급망 지도(요청 시 한 개만 생성)")
-                map_choice = st.selectbox(
-                    "지도 조합",
-                    list(valid_results.keys()),
-                    format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-                    key="lazy_map_choice",
+                st.markdown("### 계산된 모든 공급망 지도")
+                render_map_legend_outside()
+                st.caption("아래 지도는 현재 세션에서 최적해가 계산된 모든 시나리오×생산방식 조합입니다. INFEASIBLE 조합은 경로가 없으므로 지도에 표시되지 않습니다.")
+                if st.checkbox("계산된 모든 공급망 지도 한꺼번에 표시", value=False, key="show_all_maps"):
+                    ordered_keys=[k for k in [(s,m) for s in ["S1","S2","S3"] for m in ["line","modular"]] if k in valid_results]
+                    for idx in range(0,len(ordered_keys),2):
+                        cols=st.columns(2)
+                        for col,key in zip(cols,ordered_keys[idx:idx+2]):
+                            with col:
+                                st.markdown(f"#### {SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}")
+                                render_result_map(valid_results[key],f"all_map_{key[0]}_{key[1]}",height=560)
+                st.markdown("#### 지도 해석")
+                st.markdown(
+                    "파란 원은 재질·배터리/모듈을 생산하는 공급 위치, 초록 원은 차량 또는 배터리팩이 조립되는 위치입니다. "
+                    "하나의 위치가 두 역할을 모두 수행하면 파란 원과 초록 원이 같은 좌표에 겹칠 수 있습니다. 선에 마우스를 올리면 운송대상, 출발지·도착지, 운송수단, 물량과 Q구간을 확인할 수 있습니다."
                 )
-                if st.checkbox("선택한 공급망 지도 표시", value=False, key="show_one_map"):
-                    render_result_map(
-                        valid_results[map_choice],
-                        f"lazy_map_{map_choice[0]}_{map_choice[1]}",
-                        height=680,
-                    )
-
                 st.markdown("### 결과 파일")
                 if st.button("전체 결과 ZIP 생성", key="build_results_zip"):
                     with st.spinner("CSV 결과를 ZIP으로 묶는 중입니다..."):
@@ -2357,183 +2451,137 @@ def run_app():
                     })
 
     with tabs[4]:
-        st.header("수학모형과 코드의 대응")
-        st.info("이 5번 탭은 현재 구현된 수학모형과 코드가 바뀔 때마다 함께 수정되는 공식 설명 영역입니다.")
+        st.header("수학모형·코드 매핑")
+        st.info("이 탭은 현재 코드의 집합, 변수, 파라미터, 목적함수, 제약조건과 탄소계산을 설명합니다. 수학모형이 바뀔 때마다 이 탭도 함께 갱신합니다.")
 
-        st.markdown("### 5.1 집합(Set) 정의")
-        set_df = pd.DataFrame([
-            [r"$F$", "제품 집합", "전기차 6종", "products.csv"],
-            [r"$R$", "재질 집합", "철강, 알루미늄, 기타 원자재, 배터리/모듈", "MATERIALS"],
-            [r"$S$", "생산지 집합", "재질 또는 배터리/모듈을 생산할 수 있는 24개 국가/위치", "공급지 인덱스"],
-            [r"$P$", "조립지 집합", "차체 또는 완성 배터리팩·차량을 조립하는 24개 국가/위치", "조립지 인덱스"],
-            [r"$K$", "운송경로 집합", "도로, 철도, 해상+도로, 해상+철도, 항공+도로, 항공+철도", "ROUTE_MODE_CODES"],
-            [r"$G$", "차급 집합", "small, standard", "탄소상한 차급"],
-            [r"$K_0$", "내부이동 경로", "라인 방식에서 동일 위치 안의 배터리 내부이동", "코드상 k=0"],
-        ], columns=["기호", "집합 이름", "직관적 의미", "코드 대응"])
-        st.dataframe(set_df, hide_index=True, use_container_width=True)
+        render_formula_table(
+            "5.1 집합(Set) 정의",
+            ["수식", "이름", "직관적 의미"],
+            [
+                (r"F", "제품 집합", "소형·중형·대형 차량의 미드·롱 트림"),
+                (r"R", "재질 집합", "철강, 알루미늄, 기타 원자재, 배터리/모듈"),
+                (r"S", "생산지 집합", "재질·배터리/모듈을 생산할 수 있는 국가/위치"),
+                (r"P", "조립지 집합", "차체와 배터리팩을 조립할 수 있는 국가/위치"),
+                (r"K", "운송경로 집합", "도로, 철도, 해상+도로, 해상+철도, 항공+도로, 항공+철도"),
+                (r"G", "차급 집합", "small 및 standard 정책 차급"),
+            ],
+            [0],
+            "각 행은 수학모형에서 반복 인덱스로 사용하는 하나의 집합입니다.",
+            "수식은 집합기호이고, 이름과 의미는 그 기호에 포함되는 실제 대상을 설명합니다.",
+        )
 
-        st.markdown("### 5.2 결정변수와 변수종류")
-        variable_df = pd.DataFrame([
-            [r"$RP_{frs}$", "연속변수", "제품 f용 재질 r을 생산지 s에서 생산하는 양", "kg 또는 kWh", r"$\ge0$"],
-            [r"$RT_{frspk}$", "연속변수", "생산지 s에서 조립지 p로 경로 k를 통해 보내는 재질/모듈 양", "kg 또는 kWh", r"$\ge0$"],
-            [r"$FP_{fp}$", "연속변수", "조립지 p에서 조립하는 제품 f의 차량 등가량", "대 등가량", r"$\ge0$"],
-            [r"$FT_{fpk}$", "연속변수", "조립지 p에서 프랑스로 보내는 제품 f의 차량 등가량", "대 등가량", r"$\ge0$"],
-            [r"$ZM_{fsp}$", "연속변수", "모듈 방식의 10 kWh 모듈 등가량", "모듈 등가량", r"$\ge0$"],
-            [r"$ZS_{fsp}$", "연속변수", "모듈 방식의 5 kWh 모듈 등가량", "모듈 등가량", r"$\ge0$"],
-            [r"$ZL_{fpp}$", "연속변수", "라인 방식에서 조립지 p와 동일한 위치에서 생산되는 완성팩 등가량", "팩 등가량", r"$\ge0$"],
-        ], columns=["결정변수", "변수종류", "직관적 의미", "단위", "정의역"])
-        st.dataframe(variable_df, hide_index=True, use_container_width=True)
-        type_df = pd.DataFrame([
-            ["연속변수", "RP, RT, FP, FT, ZM, ZS, ZL", "현재 코드에서 실제 최적화"],
-            ["정수변수", "없음", "차량·모듈·팩 개수를 정수로 강제하지 않음"],
-            ["이진변수", "없음", "생산지 선택·운송수단 단일선택 이진변수 없음"],
-            ["고정 0/1 파라미터", r"$A^{raw},A^{fin},\delta_{sp}$", "경로허용 및 동일위치 여부; 결정변수가 아님"],
-        ], columns=["분류", "해당 항목", "현재 구현 의미"])
-        st.dataframe(type_df, hide_index=True, use_container_width=True)
-        st.warning("모든 수량변수는 연속값이므로 실제 실행계획보다 대규모 공급망의 LP 근사해로 해석해야 합니다.")
+        render_formula_table(
+            "5.2 결정변수와 변수종류",
+            ["수식", "변수종류", "직관적 의미", "단위/정의역"],
+            [
+                (r"RP_{frs}", "연속변수", "제품 f용 재질 r을 생산지 s에서 생산하는 순사용 가능량", r"kg\;or\;kWh,\;\ge0"),
+                (r"RT_{frspk}", "연속변수", "생산지 s에서 조립지 p로 경로 k를 통해 보내는 재질/모듈 물량", r"kg\;or\;kWh,\;\ge0"),
+                (r"FP_{fp}", "연속변수", "조립지 p에서 완성하는 제품 f의 차량 등가량", r"vehicle\;equivalent,\;\ge0"),
+                (r"FT_{fpk}", "연속변수", "조립지 p에서 프랑스로 경로 k를 통해 보내는 차량 등가량", r"vehicle\;equivalent,\;\ge0"),
+                (r"ZM_{fsp}", "연속변수", "모듈 방식의 10kWh 모듈 등가개수", r"module\;equivalent,\;\ge0"),
+                (r"ZS_{fsp}", "연속변수", "모듈 방식의 5kWh 모듈 등가개수", r"module\;equivalent,\;\ge0"),
+                (r"ZL_{fpp}", "연속변수", "라인 방식에서 조립지 p와 동일위치에서 생산되는 완성팩 등가개수", r"pack\;equivalent,\;\ge0"),
+            ],
+            [0,3],
+            "각 행은 solver가 값을 결정하는 하나의 의사결정변수입니다.",
+            "현재 코드에는 연속변수만 있고 정수·이진 결정변수는 없습니다. 따라서 차량·모듈·팩 수량도 LP 연속 근사값입니다.",
+        )
+        classification=pd.DataFrame([
+            ["연속변수","RP, RT, FP, FT, ZM, ZS, ZL","현재 solver가 실제 최적화"],
+            ["정수변수","없음","차량·모듈·팩 개수를 정수로 강제하지 않음"],
+            ["이진변수","없음","국가 선택 또는 단일 운송수단 선택을 0/1로 결정하지 않음"],
+            ["고정 0/1 파라미터","A(raw), A(fin), delta(s,p)","경로 허용과 동일위치 여부를 미리 정한 입력값"],
+        ],columns=["분류","해당 항목","현재 구현 의미"])
+        show_explained_dataframe(classification,"변수종류 분류 표","각 행은 변수 또는 파라미터의 수학적 종류입니다.",value_meaning="고정 0/1 파라미터는 값이 0 또는 1이지만 solver가 선택하는 이진변수가 아닙니다.")
 
-        st.markdown("### 5.3 파라미터 정의")
-        parameter_df = pd.DataFrame([
-            [r"$D_f$", "제품 f의 프랑스 수요", "대", "demand.csv"],
-            [r"$a_{fr}$", "제품 f 1대에 필요한 재질 r의 양", "kg/대 또는 kWh/대", "products.csv"],
-            [r"$B_f$", "제품 f의 완성 배터리팩 용량", "kWh/대", "battery_kwh"],
-            [r"$M_f^{bat}$", "제품 f의 배터리 질량", "kg/대", "battery_mass_kg"],
-            [r"$M_f^{NB}$", "제품 f의 비배터리 질량", "kg/대", "nonbattery_mass_kg"],
-            [r"$c^{RP}_{rs}$", "재질/모듈의 국가별 생산비", "€/kg 또는 €/kWh", "raw_material_suppliers.csv"],
-            [r"$EF^{RP}_{rs}$", "재질/모듈 생산국가 s의 생산 배출계수", "kg CO₂-eq/kg 또는 /kWh", "raw_material_suppliers.csv"],
-            [r"$c^{ASM}_{p}$", "조립국가 p의 kg당 조립비", "€/kg", "assembly_locations.csv"],
-            [r"$EF^{ASM}_{p}$", "조립국가 p의 kg당 조립 배출계수", "kg CO₂-eq/kg", "assembly_locations.csv"],
-            [r"$EF_{mode,region}$", "운송수단·지역별 배출계수", "kg CO₂-eq/(kg·km)", "transport_parameters.csv"],
-            [r"$d_{spk\ell}$", "복합경로 k의 세부구간 거리", "km", "거리행렬"],
-            [r"$L_r$", "재질 생산 손실률", "비율", "철강·알루미늄 0.3"],
-            [r"$Cap_{rs}$", "재질 r·생산지 s의 최대 생산용량", "kg 또는 kWh", "raw_material_suppliers.csv"],
-            [r"$A^{raw}_{spk},A^{fin}_{pk}$", "경로 허용 여부", "0/1", "country_transport_rules.csv"],
-            [r"$\delta_{sp}$", "생산지 s와 조립지 p가 같은 위치인지", "0/1", "s=p이면 1"],
-            [r"$\bar E_g^{cap}$", "차급 g의 1대당 탄소상한", "kg CO₂-eq/대", "scenarios.csv"],
-        ], columns=["파라미터", "직관적 의미", "단위", "코드·CSV"])
-        st.dataframe(parameter_df, hide_index=True, use_container_width=True)
+        render_formula_table(
+            "5.3 주요 파라미터",
+            ["수식", "직관적 의미", "단위/출처"],
+            [
+                (r"D_f", "제품 f의 프랑스 수요", "대, demand.csv"),
+                (r"a_{fr}", "제품 f 한 대에 필요한 재질 r의 양", "kg/대 또는 kWh/대, products.csv"),
+                (r"B_f", "제품 f의 완성 배터리팩 용량", "kWh/대"),
+                (r"M_f^{bat}", "제품 f의 배터리 질량", "kg/대"),
+                (r"M_f^{NB}", "제품 f의 비배터리 차체 질량", "kg/대"),
+                (r"c^{RP}_{rs}", "재질/모듈의 국가별 생산비", "€/kg 또는 €/kWh"),
+                (r"EF^{RP}_{rs}", "생산국가 s의 재질/모듈 생산 배출계수", "kg CO2-eq/kg 또는 /kWh"),
+                (r"EF^{ASM}_{p}", "조립국가 p의 조립 배출계수", "kg CO2-eq/kg"),
+                (r"A^{raw}_{spk},A^{fin}_{pk}", "운송경로 허용 여부", "0/1 고정 입력"),
+                (r"\delta_{sp}", "생산지 s와 조립지 p의 동일위치 여부", "s=p이면 1"),
+                (r"Cap_{rs}", "재질 r·생산지 s의 최대 생산용량", "kg 또는 kWh"),
+                (r"\bar E_g^{cap}", "차급 g의 차량 1대당 탄소상한", "kg CO2-eq/대"),
+            ],
+            [0],
+            "각 행은 의사결정변수의 비용·배출·용량·수요를 정하는 고정 입력 파라미터입니다.",
+            "수식 셀은 기호, 의미 셀은 사용자 해석, 단위/출처 셀은 값의 측정단위와 CSV 위치입니다.",
+        )
 
         st.markdown("### 5.4 목적함수")
-        st.latex(r"""
-        \min Z=\sum c^{RP}RP+\sum c^{RT}RT+\sum c^{BODY}FP
-        +\mathbf{1}_{mod}\sum c^{PACK}FP+\sum c^{FT}FT
-        """)
-        objective_df = pd.DataFrame([
-            ["재질·배터리/모듈 생산비", "국가별 생산물량 × 단위생산비"],
-            ["부품·모듈 운송비", "운송질량 × 복합경로 비용"],
-            ["비배터리 차체 조립비", "비배터리 질량 × 조립국가 비용"],
-            ["모듈 방식 팩 조립비", "배터리 질량 × 팩 조립국가 비용; 모듈 방식에만 추가"],
-            ["완제품 운송비", "차량질량 × 프랑스까지의 경로비용"],
-        ], columns=["비용요소", "계산 의미"])
-        st.dataframe(objective_df, hide_index=True, use_container_width=True)
+        st.latex(r"\min Z=\sum c^{RP}RP+\sum c^{RT}RT+\sum c^{BODY}FP+\mathbf{1}_{mod}\sum c^{PACK}FP+\sum c^{FT}FT")
+        objective_rows=[
+            (r"\sum c^{RP}RP","재질·배터리/모듈 생산비","국가별 생산량 × 단위생산비"),
+            (r"\sum c^{RT}RT","부품·모듈 운송비","운송질량 × 복합경로 비용"),
+            (r"\sum c^{BODY}FP","비배터리 차체 조립비","비배터리 질량 × 조립국가 비용"),
+            (r"\mathbf{1}_{mod}\sum c^{PACK}FP","모듈 방식 팩 조립비","배터리 질량 × 팩 조립국가 비용; 모듈 방식에만 적용"),
+            (r"\sum c^{FT}FT","완제품 운송비","차량 전체질량 × 프랑스까지의 경로비용"),
+        ]
+        render_formula_table("목적함수 구성요소",["수식항","비용요소","사용자 해석"],objective_rows,[0],"각 행은 총비용 목적함수를 구성하는 하나의 비용항입니다.","모든 수식항을 합한 값이 solver가 최소화하는 총비용입니다.")
 
         st.markdown("### 5.5 제약조건")
-        st.markdown("**(1) 제품별 수요의 정확한 충족**")
-        st.latex(r"\sum_{p,k}FT_{fpk}=D_f")
-
-        st.markdown("**(2) 비배터리 재질의 공급·조립 물량보존**")
-        st.latex(r"RP_{frs}=\sum_{p,k}RT_{frspk}")
-        st.latex(r"\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp}\quad r\in\{steel,aluminum,other\}")
-        st.latex(r"FP_{fp}=\sum_kFT_{fpk}")
-
-        st.markdown("**(3) 라인 생산: 배터리 생산지=조립지**")
-        st.latex(r"RT_{f,bat,s,p,k}=0\quad\text{if }s\ne p\text{ or }k\ne k_0")
-        st.latex(r"RT_{f,bat,p,p,k_0}=B_fZL_{fpp}")
-        st.latex(r"ZL_{fpp}=FP_{fp}")
-        st.markdown("완성팩은 차량 조립지와 동일한 위치에서 생산되므로 배터리의 국가 간 운송이 발생하지 않습니다.")
-
-        st.markdown("**(4) 모듈 생산: 생산지와 팩 조립지 분리 가능**")
-        st.latex(r"\sum_kRT_{f,bat,s,p,k}=10ZM_{fsp}+5ZS_{fsp}")
-        st.latex(r"\sum_{s,k}RT_{f,bat,s,p,k}=B_fFP_{fp}")
-        st.markdown("10/5 kWh 모듈은 s에서 생산되어 다른 p로 이동할 수 있고, p에서 차량별 완성팩 용량을 조립합니다.")
-
-        st.markdown("**(5) 공급지 생산능력과 경로허용**")
-        st.latex(r"\sum_fRP_{frs}\le Cap_{rs}")
-        st.latex(r"RT=0\text{ if }A^{raw}=0,\qquad FT=0\text{ if }A^{fin}=0")
+        constraints=[
+            (r"\sum_{p,k}FT_{fpk}=D_f","수요충족","제품별 프랑스 수요를 정확히 충족"),
+            (r"RP_{frs}=\sum_{p,k}RT_{frspk}","공급지 수지","생산량과 모든 조립지로 나가는 출고량 일치"),
+            (r"\sum_{s,k}RT_{frspk}=a_{fr}FP_{fp}","조립지 재질수지","들어온 비배터리 재질량과 차량생산 필요량 일치"),
+            (r"FP_{fp}=\sum_kFT_{fpk}","조립지 출하수지","조립한 차량수와 프랑스로 보낸 차량수 일치"),
+            (r"RT_{f,bat,s,p,k}=0\;(s\ne p)","라인 동일위치","라인 방식에서 배터리 생산지와 조립지 동일"),
+            (r"RT_{f,bat,p,p,k_0}=B_fZL_{fpp},\;ZL_{fpp}=FP_{fp}","라인 팩수지","완성팩 용량과 조립차량수 일치"),
+            (r"\sum_kRT_{f,bat,s,p,k}=10ZM_{fsp}+5ZS_{fsp}","모듈 생산수지","10/5kWh 모듈 생산량과 출고 kWh 일치"),
+            (r"\sum_{s,k}RT_{f,bat,s,p,k}=B_fFP_{fp}","모듈 팩조립수지","p에 들어온 모듈 kWh와 완성차 팩용량 일치"),
+            (r"\sum_fRP_{frs}\le Cap_{rs}","생산용량","국가별 공급능력 초과 금지"),
+        ]
+        render_formula_table("제약조건 식",["수식","제약 이름","직관적 설명"],constraints,[0],"각 행은 feasible 공급망이 반드시 만족해야 하는 하나의 제약식입니다.","등식은 좌우 물량을 정확히 맞추며, 부등식은 최대용량 또는 상한을 넘지 못하게 합니다.")
 
         st.markdown("### 5.6 탄소배출량 계산요소와 탄소상한")
-        st.markdown(
-            "PDF의 탄소발자국 항목은 **철강, 알루미늄, 기타 원자재, 배터리, 조립, 운송**입니다. "
-            "코드는 이를 공급망 공정 순서에 맞춰 아래 5개 블록으로 계산합니다."
-        )
         st.latex(r"C_f=C_f^{PROD}+C_f^{IN}+C_f^{BODY}+C_f^{PACK}+C_f^{OUT}")
-        emission_blocks = pd.DataFrame([
-            ["1. 생산", "철강·알루미늄·기타 원자재·배터리/모듈 생산", "생산국가별 EF 적용; 철강·알루미늄 손실률 0.3"],
-            ["2. 부품·모듈 유입운송", "생산지→조립지", "재질 kg 또는 배터리 kWh를 kg으로 변환하여 경로별 EF 적용"],
-            ["3. 비배터리 차체 조립", "차체·기타 구조 조립", "비배터리 질량 × 조립국가 EF"],
-            ["4. 모듈→완성팩 조립", "모듈 방식에서 p의 완성팩 조립", "배터리 질량 × 팩 조립국가 EF; 사용자 요구로 추가된 확장항"],
-            ["5. 완제품 출하운송", "조립지→프랑스", "차량 전체질량 × 경로별 EF"],
-        ], columns=["탄소 블록", "포함 공정", "계산 핵심"])
-        st.dataframe(emission_blocks, hide_index=True, use_container_width=True)
-
-        st.markdown("#### 5.6.1 생산 배출량")
+        emission_rows=[
+            (r"C_f^{PROD}","생산","철강·알루미늄·기타 원자재·배터리/모듈의 국가별 생산배출"),
+            (r"C_f^{IN}","부품·모듈 유입운송","생산지에서 조립지까지의 재질/모듈 운송배출"),
+            (r"C_f^{BODY}","비배터리 차체 조립","비배터리 질량 × 조립국가 p의 조립EF"),
+            (r"C_f^{PACK}","모듈→완성팩 조립","모듈 방식만: 배터리질량 × 팩이 조립되는 국가 p의 조립EF"),
+            (r"C_f^{OUT}","완제품 운송","완성차 전체질량 × 조립지에서 프랑스까지의 운송EF"),
+        ]
+        render_formula_table("탄소배출량 구성요소",["수식항","공정블록","포함되는 실제 배출"],emission_rows,[0],"각 행은 차량 f의 공급망 탄소발자국을 구성하는 하나의 공정블록입니다.","다섯 항을 모두 합한 값이 차량 f의 총 공급망 탄소배출량입니다.")
         st.latex(r"C_f^{PROD}=\sum_{r,s}\frac{EF^{RP}_{rs}}{1-L_r}RP_{frs}")
-        st.markdown(
-            "철강과 알루미늄은 순사용량을 0.7로 나누어 손실 포함 총생산량을 계산합니다. "
-            "배터리/모듈은 생산국가 s의 kg CO₂-eq/kWh를 적용하며, 10 kWh와 5 kWh 모듈 크기 자체는 배출계수를 바꾸지 않습니다."
-        )
-
-        st.markdown("#### 5.6.2 부품·모듈 유입운송")
+        st.markdown("철강과 알루미늄은 손실률 0.3 때문에 순사용량을 0.7로 나누어 총생산량을 계산합니다. 배터리/모듈에는 생산국가 s의 국가별 kg CO₂-eq/kWh가 적용됩니다.")
         st.latex(r"C_f^{IN}=\sum_{r,s,p,k}e^{IN}_{frspk}RT_{frspk}")
-        st.markdown(
-            "철강·알루미늄·기타는 kg 물량을 사용합니다. 배터리/모듈 RT는 kWh이므로 제품별 kg/kWh로 질량을 바꾼 뒤, "
-            "도로·철도 또는 해상/항공+내륙운송의 거리와 계수를 곱합니다. 라인 방식의 배터리는 동일 위치 내부이동이므로 이 항이 0입니다."
-        )
-
-        st.markdown("#### 5.6.3 차체 조립과 모듈 팩 조립")
+        st.markdown("비배터리 재질은 kg 물량을 직접 사용하고, 배터리/모듈 kWh는 제품별 kg/kWh로 환산한 후 운송거리와 운송수단별 EF를 곱합니다.")
         st.latex(r"C_f^{BODY}=\sum_pM_f^{NB}EF_p^{ASM}FP_{fp}")
         st.latex(r"C_f^{PACK}=\mathbf{1}_{mod}\sum_pM_f^{bat}EF_p^{ASM}FP_{fp}")
-        st.markdown(
-            "차체 조립은 두 방식 모두 포함합니다. 모듈 방식에서는 p에서 10/5 kWh 모듈을 완성팩으로 조립하므로 배터리 질량에 p 국가의 조립계수를 추가 적용합니다. "
-            "이 별도 팩 조립항은 PDF에 독립 계수가 제시되지 않아, 사용자의 새 생산구조를 반영해 기존 국가별 조립계수를 사용한 확장 가정입니다."
-        )
-
-        st.markdown("#### 5.6.4 완제품 운송")
+        st.markdown("현재 코드에서 모듈→팩 조립 배출계수는 배터리팩이 조립되는 국가 p의 `assembly_ef_kgco2_per_kg`입니다. 따라서 생산국가 s가 아니라 실제 팩 조립국가 p의 EF가 적용됩니다.")
         st.latex(r"C_f^{OUT}=\sum_{p,k}M_f^{veh}e^{OUT}_{pk}FT_{fpk}")
-        st.markdown("차량 전체질량과 조립지→프랑스 복합경로 배출계수를 사용합니다.")
 
-        st.markdown("#### 5.6.5 PDF에서 직접 온 부분과 SaaS에서 추가한 부분")
-        source_df = pd.DataFrame([
-            ["PDF 직접 근거", "철강·알루미늄 손실률, 기타 원자재, 배터리 kWh×국가별 계수, 조립, 운송, 기준차량/기타차량 점수곡선"],
-            ["PDF에 없는 모델링 선택", "라인의 동일위치 강제, 10/5 kWh 모듈 네트워크, 모듈→팩 별도 조립항, 차급 평균상한"],
-            ["PDF에 가장 가까운 상한 방식", "각 제품/트림의 EC_version을 개별 평가하는 product-strict"],
-        ], columns=["구분", "내용"])
-        st.dataframe(source_df, hide_index=True, use_container_width=True)
-
-        st.markdown("#### 5.6.6 트림별 상한(product-strict)")
+        st.markdown("#### 트림별 상한(product-strict)")
         st.latex(r"C_f\le E_{class(f)}^{cap}D_f\qquad\forall f")
-        st.markdown(
-            "각 트림이 자기 차량 1대당 기준을 개별적으로 만족해야 합니다. 예를 들어 소형 50 kWh 트림과 60 kWh 트림 중 하나라도 상한을 넘으면 그 트림은 실패합니다. "
-            "PDF의 EC_version 기반 개별 차량 점수 산정에 가장 가까운 구현입니다."
-        )
-
-        st.markdown("#### 5.6.7 차급 평균상한(class-average)")
-        st.latex(r"\sum_{f\in g}C_f\le \bar E_g^{cap}\sum_{f\in g}D_f")
-        st.markdown(
-            "small 또는 standard 차급 안의 여러 트림을 하나의 묶음으로 보고 수요가중 평균을 제한합니다. "
-            "한 트림이 상한을 조금 넘더라도 다른 저탄소 트림의 여유로 평균이 기준 이하면 통과할 수 있습니다. "
-            "이 방식은 PDF에 명시된 규칙이 아니라 포스터형 포트폴리오 비교와 모델 실행을 위해 SaaS에 추가한 집계 옵션입니다."
-        )
-        cap_example = pd.DataFrame([
-            ["트림 A", "8,000", "통과"],
-            ["트림 B", "9,000", "실패"],
-            ["동일 수요 평균", "8,500", "차급 기준 8,750이면 평균상한은 통과"],
-        ], columns=["소형차 예시", "kg CO₂-eq/대", "트림별/평균 해석"])
-        st.dataframe(cap_example, hide_index=True, use_container_width=True)
+        st.markdown("각 미드·롱 트림이 자기 상한을 개별적으로 만족해야 합니다. 한 트림이 초과하면 다른 트림의 낮은 배출량으로 보상할 수 없습니다. PDF의 개별 차량 버전 EC_version 점수화에 더 가까운 방식입니다.")
+        st.markdown("#### 차급 평균상한(class-average)")
+        st.latex(r"\sum_{f\in g}C_f\le\bar E_g^{cap}\sum_{f\in g}D_f")
+        st.markdown("같은 차급의 여러 트림을 수요량으로 가중해 평균 배출량을 제한합니다. 한 트림이 상한을 초과해도 다른 저탄소 트림의 여유로 차급 평균이 기준 이하이면 통과할 수 있습니다. 이 방식은 PDF 직접 규칙이 아니라 포트폴리오 비교를 위해 SaaS가 추가한 옵션입니다.")
+        source_df=pd.DataFrame([
+            ["PDF 직접 근거","재질·배터리·조립·운송 배출항, 철강/알루미늄 손실률, 차량 버전별 점수곡선"],
+            ["SaaS 확장","10/5kWh 모듈 네트워크, 라인 동일위치, 모듈 팩조립항, 차급 평균상한"],
+        ],columns=["근거 구분","포함 내용"])
+        show_explained_dataframe(source_df,"PDF 근거와 SaaS 확장 표","각 행은 모형 요소의 출처 구분입니다.",value_meaning="PDF 직접 근거와 연구 목적상 추가한 모델링 선택을 구분합니다.")
 
         st.markdown("### 5.7 코드 매핑")
-        mapping = pd.DataFrame([
-            ["라인 동일위치", "battery RT ub 설정 + diagonal ZL", "s≠p 배터리 흐름을 0으로 고정"],
-            ["모듈 생산", "ZM/ZS + battery RT", "10/5 kWh 모듈 생산·운송"],
-            ["완성팩 조립", "battery RT total = B_f FP", "p에서 차량별 팩 용량 충족"],
-            ["국가별 생산 EF", "supplier_ef[r,s]", "재질·모듈 생산국가별 계수"],
-            ["국가별 팩 조립 EF", "assembly_ef[p] × battery_mass", "모듈 방식 p의 팩 조립 확장항"],
-            ["탄소상한", "product_strict / class_average", "개별 트림 또는 차급 수요가중 평균"],
-        ], columns=["수학요소", "코드", "역할"])
-        st.dataframe(mapping, hide_index=True, use_container_width=True)
-        st.caption(
-            f"역사적 Xpress 참조 LP SHA-256: {REFERENCE_LP_SHA256} · v8.6은 라인의 배터리 생산-조립 동일위치와 모듈의 분산 모듈생산-현지 팩조립 구조를 반영합니다."
-        )
+        code_rows=[
+            (r"s=p","라인 배터리 동일위치","battery RT upper bound + diagonal ZL"),
+            (r"10ZM+5ZS","모듈 생산","ZM/ZS + battery RT"),
+            (r"B_fFP_{fp}","p에서 완성팩 용량 충족","battery RT total equality"),
+            (r"EF^{RP}_{rs}","국가별 생산EF","supplier_ef[r,s]"),
+            (r"EF^{ASM}_{p}M_f^{bat}FP_{fp}","국가별 팩조립EF","assembly_ef[p] × battery_mass × FP"),
+        ]
+        render_formula_table("수식-코드 대응",["수식","수학적 역할","코드 구현"],code_rows,[0],"각 행은 하나의 수학적 구조와 이를 구현한 코드 위치입니다.","수식은 사용자에게 보이는 모델 의미이고 코드 구현은 실제 배열·제약 생성 방법입니다.")
+        st.caption(f"역사적 Xpress 참조 LP SHA-256: {REFERENCE_LP_SHA256} · v8.7은 3-Stage 설명, 렌더링 수식표, 모든 지도 표시, 탄소 그래프와 INFEASIBLE 진단 설명을 반영합니다.")
 
     with tabs[5]:
         st.header("포스터 기준 결과와 비교")
