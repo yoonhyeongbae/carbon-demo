@@ -649,16 +649,19 @@ class LinearConstraintBuilder:
         return len(self.eq_data) + len(self.ub_data)
 
     def clear_coefficients(self) -> None:
-        self.eq_cols.clear()
-        self.eq_data.clear()
-        self.eq_starts.clear()
+        # Some Streamlit Community Cloud Python images expose array.array
+        # without a .clear() method. Slice deletion works across supported
+        # Python versions and releases the compact coefficient buffers.
+        del self.eq_cols[:]
+        del self.eq_data[:]
+        del self.eq_starts[:]
         self.eq_starts.append(0)
-        self.eq_rhs.clear()
-        self.ub_cols.clear()
-        self.ub_data.clear()
-        self.ub_starts.clear()
+        del self.eq_rhs[:]
+        del self.ub_cols[:]
+        del self.ub_data[:]
+        del self.ub_starts[:]
         self.ub_starts.append(0)
-        self.ub_rhs.clear()
+        del self.ub_rhs[:]
 
 
 @dataclass
