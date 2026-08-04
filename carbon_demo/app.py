@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.11"
-APP_PACKAGE_ID = "20260804-v8.11-fixed-score-fleet-total-four-scenarios"
+APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.12"
+APP_PACKAGE_ID = "20260804-v8.12-score-label-parameter-inventory"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -69,6 +69,7 @@ MODE_LABEL = {
     "modular": "모듈 활용 분산 생산",
 }
 SCENARIO_SHORT = {"S1": "시나리오 ①", "S2": "시나리오 ②", "S3": "시나리오 ③", "S4": "시나리오 ④"}
+SCENARIO_POLICY_SCORE = {"S1": None, "S2": 60.0, "S3": 65.0, "S4": 70.0}
 QUARTILE_LABELS = ["Q1", "Q2", "Q3", "Q4"]
 
 # Direct land modes are used for Europe-Europe and same-continent routes.
@@ -2280,7 +2281,16 @@ def render_solver_metrics(result: Dict):
 
 
 def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id: str):
-    st.markdown(f"### {SCENARIO_SHORT[scenario_id]} 결과")
+    policy_score = SCENARIO_POLICY_SCORE.get(scenario_id)
+    policy_text = "보조금 탄소점수 기준 없음" if policy_score is None else f"보조금 기준 {policy_score:.0f}점"
+    st.markdown(f"### {SCENARIO_SHORT[scenario_id]} 결과 — {policy_text}")
+    if policy_score is None:
+        st.caption("정책 탄소상한을 적용하지 않은 회사 공급망 비용 최소 baseline입니다.")
+    else:
+        st.caption(
+            f"이 시나리오는 {policy_score:.0f}점에 대응하는 차급별 탄소상한을 수요량으로 가중 합산한 "
+            "회사 전체 차량(fleet-total) 탄소상한을 적용합니다."
+        )
     line = results.get((scenario_id, "line"))
     modular = results.get((scenario_id, "modular"))
     if not line or not modular:
@@ -4297,7 +4307,7 @@ def run_app():
     st.set_page_config(page_title="PDF 기반 전기차 공급망 Route LP", page_icon="🚗", layout="wide")
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
-    st.caption("build: pdf-country-route-fixed-score-battery-parity-v8.10 · S2=60/S3=65/S4=70 고정상한 · 배터리 제조조립 대칭 적용")
+    st.caption("build: pdf-country-route-fixed-score-fleet-total-v8.12 · S2=60/S3=65/S4=70 · 시나리오별 보조금 기준점수 표시")
 
     defaults = load_default_tables()
     with st.sidebar:
