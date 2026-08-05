@@ -1,4 +1,4 @@
-# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_19_CURRENT_UI_EXACT_V813_MODEL_PARAMETERS
+# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_20_UI_CLEANUP_EXACT_V813_MODEL_PARAMETERS
 from __future__ import annotations
 
 import base64
@@ -30,8 +30,8 @@ APP_DIR = Path(__file__).resolve().parent
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.19"
-APP_PACKAGE_ID = "20260805-v8.19-current-ui-exact-v8.13-model-parameters"
+APP_BUILD = "pdf-country-route-fixed-score-company-total-v8.20"
+APP_PACKAGE_ID = "20260805-v8.20-ui-cleanup-exact-v8.13-model-parameters"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -1624,7 +1624,7 @@ def extract_solution(result: SolveResult) -> Dict:
             "individual_reference_met_not_constraint": bool(
                 np.isnan(effective_reference_cap) or per_vehicle <= effective_reference_cap + 1e-5
             ),
-            "policy_constraint_mode": "fleet_total",
+            "policy_constraint_mode": "회사 전체 탄소상한",
         })
     product_df = pd.DataFrame(product_rows)
 
@@ -1795,7 +1795,7 @@ def solve_with_policy_relaxation(
     score_override: Optional[float] = None,
     progress_callback: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
-    """Increase the fleet-total carbon cap in fixed percentage steps until feasible.
+    """Increase the 회사 전체 carbon cap in fixed percentage steps until feasible.
 
     For a relaxation r%, the policy-cost extension is:
         subsidy_loss = total_demand * subsidy_benefit_per_vehicle * r/100.
@@ -2404,7 +2404,7 @@ def render_poster_scenario(results: Mapping[Tuple[str, str], Dict], scenario_id:
     else:
         st.caption(
             f"이 시나리오는 {policy_score:.0f}점에 대응하는 차급별 탄소상한을 수요량으로 가중 합산한 "
-            "회사 전체 차량(fleet-total) 탄소상한을 적용합니다."
+            "회사 전체 탄소상한을 적용합니다."
         )
     line = results.get((scenario_id, "line"))
     modular = results.get((scenario_id, "modular"))
@@ -2471,7 +2471,7 @@ def render_country_selection(plants: pd.DataFrame) -> List[str]:
 
 
 # =============================================================================
-# V8.11 extended model: fixed fleet-total policy cap, material-specific
+# V8.11 extended model: fixed 회사 전체 policy cap, material-specific
 # country selection, and supply-chain-cost-only objective.
 # =============================================================================
 
@@ -2898,7 +2898,7 @@ def extract_solution(result: SolveResult) -> Dict:
             product_df["reference_cap_total_kgco2"] = np.nan
             product_df["reference_cap_slack_kgco2_per_vehicle"] = np.nan
             product_df["reference_cap_met_individually"] = True
-        product_df["policy_constraint_mode"] = "fleet_total"
+        product_df["policy_constraint_mode"] = "회사 전체 탄소상한"
         out["product_summary"] = product_df
         out["all_product_reference_caps_met"] = bool(product_df["reference_cap_met_individually"].all())
 
@@ -3261,10 +3261,6 @@ def render_country_selection_by_material(
     labels = {**MATERIAL_LABEL, "assembly": "비배터리 차체·차량 조립"}
 
     with st.expander("재질별 생산국가·조립국가 선택", expanded=True):
-        st.caption(
-            "PDF 표는 주로 국가·권역별 탄소배출계수를 제공합니다. 특정 국가를 명시적으로 금지하는 표는 아니므로, "
-            "baseline에서는 각 재질과 조립에 24개 모델 국가를 모두 허용합니다. 사용자는 계약·조달·지정학적 리스크를 반영해 재질별로 국가를 제외할 수 있습니다."
-        )
         tabs = st.tabs([labels[k] for k in [*MATERIALS, "assembly"]])
         for tab, key in zip(tabs, [*MATERIALS, "assembly"]):
             with tab:
@@ -3367,7 +3363,7 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
 
 def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.header("수학모형과 코드의 대응")
-    st.info("v8.11: 라인·모듈의 배터리 제조조립 경계는 동일하게 유지하며, S2=60점·S3=65점의 fleet-total 탄소상한을 적용합니다.")
+    st.info("v8.11: 라인·모듈의 배터리 제조조립 경계는 동일하게 유지하며, S2=60점·S3=65점의 회사 전체 탄소상한을 적용합니다.")
 
     st.markdown("### 5.1 집합")
     set_rows = [
@@ -3469,8 +3465,8 @@ def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
 
     st.markdown("### 5.11 회사 총탄소배출량과 상한 이용률")
     st.latex(r"E^{Company}=\sum_fE_f")
-    st.latex(r"U^{cap}=100\times\frac{E^{Company}}{E^{FleetCap}}")
-    st.markdown("S1에서는 회사 총배출량이 결과 지표로만 사용됩니다. S2와 S3에서는 같은 총배출량이 fleet-total 탄소상한의 좌변이며, 상한 이용률이 100% 이하이면 정책제약을 만족합니다.")
+    st.latex(r"U^{cap}=100\times\frac{E^{Company}}{E^{CompanyCap}}")
+    st.markdown("S1에서는 회사 총배출량이 결과 지표로만 사용됩니다. S2와 S3에서는 같은 총배출량이 회사 전체 탄소상한의 좌변이며, 상한 이용률이 100% 이하이면 정책제약을 만족합니다.")
 
 
 def render_solver_metrics(result: Dict):
@@ -3478,7 +3474,7 @@ def render_solver_metrics(result: Dict):
     if status != "OPTIMAL":
         st.error(f"{status}: {result.get('message', '최적해를 찾지 못했습니다.')}")
         if status == "INFEASIBLE":
-            st.caption("현재 고정점수의 fleet-total 탄소상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없습니다. 수행능력 초과를 뜻하지 않습니다.")
+            st.caption("현재 고정점수의 회사 전체 탄소상한, 국가선택, 용량과 물량수지를 동시에 만족하는 해가 없습니다. 수행능력 초과를 뜻하지 않습니다.")
         return
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("최적 공급망 비용", f"€{float(result.get('objective_value', 0)):,.0f}")
@@ -3548,7 +3544,6 @@ def baseline_change_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.Dat
 
 def _render_input_data_tab_v89(tables: Mapping[str, pd.DataFrame]):
     st.header("PDF 기반 입력 데이터")
-    st.info("PDF 표의 국가·권역별 생산·운송계수와 사용자 입력의 배터리 질량기반 제조조립계수를 사용합니다. 재질별 생산가능 국가는 3번 탭에서 독립적으로 제한합니다.")
     display_names = {
         "products.csv": "제품 6종", "demand.csv": "프랑스 수요",
         "raw_material_suppliers.csv": "재질별 국가 생산계수·비용",
@@ -3556,7 +3551,7 @@ def _render_input_data_tab_v89(tables: Mapping[str, pd.DataFrame]):
         "transport_parameters.csv": "운송수단·지역별 계수",
         "country_transport_rules.csv": "국가별 허용 운송수단",
         "material_parameters.csv": "재질 손실률", "markets.csv": "수요지",
-        "scenarios.csv": "시나리오", "model_metadata.csv": "모형 상수·가정",
+        "scenarios.csv": "시나리오",
     }
     subtabs = st.tabs(list(display_names.values()))
     for sub, filename in zip(subtabs, display_names):
@@ -3578,7 +3573,7 @@ def _make_score_progress_callback(status_box, progress=None, prefix: str = ""):
             if score is None:
                 status_box.info(f"{prefix}탄소상한 없이 공급망 비용 최소화 LP를 계산 중입니다.")
             else:
-                status_box.info(f"{prefix}{float(score):.0f}점의 fleet-total 탄소상한을 적용하여 최적 공급망을 계산 중입니다.")
+                status_box.info(f"{prefix}{float(score):.0f}점의 회사 전체 탄소상한을 적용하여 최적 공급망을 계산 중입니다.")
         elif event_type == "attempt_end" and event.get("status") == "INFEASIBLE":
             next_score = event.get("next_score")
             if next_score is None:
@@ -3790,13 +3785,21 @@ def _render_optimization_results(results: Mapping[Tuple[str, str], Dict]) -> Non
                     )
         with subtabs[5]:
             st.json({
-                key: selected.get(key) for key in [
-                    "status", "solver_name", "solver_version", "solver_iterations",
-                    "variable_count", "constraint_count", "matrix_nonzeros", "wall_time_sec",
-                    "applied_policy_score", "fleet_total_cap_kgco2", "fleet_cap_slack_kgco2",
-                    "fleet_cap_utilization_pct", "fleet_cap_met",
-                    "all_product_reference_caps_met", "objective_reconstruction_gap_eur",
-                ]
+                "상태": selected.get("status"),
+                "Solver": selected.get("solver_name"),
+                "Solver 버전": selected.get("solver_version"),
+                "반복 횟수": selected.get("solver_iterations"),
+                "변수 수": selected.get("variable_count"),
+                "제약식 수": selected.get("constraint_count"),
+                "비영계수 수": selected.get("matrix_nonzeros"),
+                "계산시간(초)": selected.get("wall_time_sec"),
+                "적용 정책점수": selected.get("applied_policy_score"),
+                "회사 전체 탄소상한(kg CO₂-eq)": selected.get("fleet_total_cap_kgco2"),
+                "잔여 탄소예산(kg CO₂-eq)": selected.get("fleet_cap_slack_kgco2"),
+                "탄소상한 이용률(%)": selected.get("fleet_cap_utilization_pct"),
+                "탄소상한 충족": selected.get("fleet_cap_met"),
+                "제품별 참고상한 충족": selected.get("all_product_reference_caps_met"),
+                "목적함수 재구성 차이(EUR)": selected.get("objective_reconstruction_gap_eur"),
             })
 
 
@@ -3804,11 +3807,6 @@ def run_app():
     st.set_page_config(page_title="전기차 공급망 탄소 최적화", page_icon="🚗", layout="wide")
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
-    st.caption(
-        "build: pdf-country-route-fixed-score-fleet-total-v8.19 · "
-        "S2=60/S3=65 · GLOP 전용"
-    )
-
     # All required CSV inputs are embedded in this app.py and loaded automatically.
     tables = load_default_tables()
     with st.sidebar:
@@ -3844,10 +3842,6 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
-        st.info(
-            "S1은 탄소상한이 없는 회사 baseline이며, S2와 S3는 각각 60점과 65점의 "
-            "fleet-total 탄소상한을 적용합니다. 모든 조합은 GLOP로 비용 최소 OPTIMAL 해를 계산합니다."
-        )
         c1, c2, c3 = st.columns(3)
         scenario_id = c1.selectbox(
             "시나리오", ["S1", "S2", "S3"],
@@ -3873,7 +3867,7 @@ def run_app():
             scenario_row = tables["scenarios.csv"].set_index("scenario_id").loc[scenario]
             score = float(scenario_row.get("minimum_score", 0.0))
             if int(scenario_row.get("apply_carbon_cap", 0)) == 1:
-                status_box.info(f"{prefix}{score:.0f}점의 fleet-total 탄소상한에서 계산 중입니다.")
+                status_box.info(f"{prefix}{score:.0f}점의 회사 전체 탄소상한에서 계산 중입니다.")
             else:
                 status_box.info(f"{prefix}탄소상한 없는 회사 baseline을 계산 중입니다.")
             if progress is not None:
