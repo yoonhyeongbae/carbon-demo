@@ -1,6 +1,7 @@
 # DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_10
 from __future__ import annotations
 
+import base64
 import gc
 import hashlib
 import io
@@ -26,12 +27,11 @@ except Exception:  # local syntax/core testing without Streamlit
 
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.16"
-APP_PACKAGE_ID = "20260805-v8.16-glop-embedded-data-five-tabs"
+APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.17"
+APP_PACKAGE_ID = "20260805-v8.17-single-file-embedded-data-five-tabs"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -46,6 +46,99 @@ REQUIRED_FILES = [
     "scenarios.csv",
     "model_metadata.csv",
 ]
+
+
+# The complete CSV input bundle is embedded in this file.
+# This makes carbon_demo/app.py deployable by itself: no data/ directory,
+# file upload, or repository-relative path is required at runtime.
+EMBEDDED_DATA_ZIP_B64 = (
+    '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'
+    'AA=='
+)
+EMBEDDED_DATA_SHA256 = "b60a38802d4d48af1b33ed5f92d306c03ee1dab1e7ddeb5ca825fe6854f1b4a0"
 
 MATERIALS = ["steel", "aluminum", "other", "battery"]
 MATERIAL_INDEX = {m: i for i, m in enumerate(MATERIALS)}
@@ -125,11 +218,20 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def load_default_tables() -> Dict[str, pd.DataFrame]:
+    """Load the immutable CSV inputs embedded directly in app.py."""
+    archive_bytes = base64.b64decode(EMBEDDED_DATA_ZIP_B64.encode("ascii"))
+    if sha256_bytes(archive_bytes) != EMBEDDED_DATA_SHA256:
+        raise RuntimeError("내장 입력 데이터의 무결성 검증에 실패했습니다.")
+
     tables: Dict[str, pd.DataFrame] = {}
-    for name in REQUIRED_FILES:
-        path = DATA_DIR / name
-        if path.exists():
-            tables[name] = pd.read_csv(path, encoding="utf-8-sig")
+    with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+        archived_names = set(archive.namelist())
+        missing = [name for name in REQUIRED_FILES if name not in archived_names]
+        if missing:
+            raise RuntimeError("내장 입력 데이터 누락: " + ", ".join(missing))
+        for name in REQUIRED_FILES:
+            with archive.open(name, "r") as csv_file:
+                tables[name] = pd.read_csv(csv_file, encoding="utf-8-sig")
     return tables
 
 
@@ -3721,15 +3823,14 @@ def run_app():
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
     st.caption(
-        "build: pdf-country-route-fixed-score-fleet-total-v8.16 · "
-        "내장 CSV 자동 로드 · S2=60/S3=65 · GLOP 전용"
+        "build: pdf-country-route-fixed-score-fleet-total-v8.17 · "
+        "S2=60/S3=65 · GLOP 전용"
     )
 
-    # The deployed SaaS always uses the version-controlled CSV files in data/.
+    # All required CSV inputs are embedded in this app.py and loaded automatically.
     tables = load_default_tables()
     with st.sidebar:
         st.header("실행 설정")
-        st.caption("앱의 data 폴더에 포함된 CSV가 자동으로 로드됩니다.")
         if st.button("결과 메모리 초기화", use_container_width=True):
             for key in ("optimization_results", "score_sensitivity", "results_zip_bytes"):
                 st.session_state.pop(key, None)
@@ -3738,8 +3839,10 @@ def run_app():
 
     errors = validate_tables(tables)
     if errors:
-        for error in errors:
-            st.error(error)
+        st.error("내장 입력 데이터 검증에 실패했습니다. 배포 파일을 다시 반영해 주세요.")
+        with st.expander("검증 상세", expanded=False):
+            for error in errors:
+                st.write(f"- {error}")
         st.stop()
 
     tabs = st.tabs([
