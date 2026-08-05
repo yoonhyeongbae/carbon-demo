@@ -30,8 +30,8 @@ DATA_DIR = APP_DIR / "data"
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.14"
-APP_PACKAGE_ID = "20260805-v8.14-neutral-metadata-cost-tab"
+APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.15"
+APP_PACKAGE_ID = "20260805-v8.15-solver-stability-overview-clean-ui"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -104,6 +104,14 @@ MIN_DISTANCE_KM = 0.0
 INTERNATIONAL_INLAND_LEG_KM = 50.0
 FLOW_TOL = 1e-6
 MAX_SENSITIVITY_POINTS = 5
+
+# The source table used 1,000,000 EUR/(kg·km) as an inactive-mode sentinel.
+# Such a large coefficient creates an ill-conditioned LP in GLOP. The bounded
+# penalty keeps inactive road/rail choices strongly disfavoured while avoiding
+# solver ABNORMAL states. Uploaded legacy CSVs are capped to this value too.
+PROHIBITIVE_TRANSPORT_COST_EUR_PER_KGKM = 0.1
+OBJECTIVE_TARGET_MAX_COEFFICIENT = 1_000.0
+ORTOOLS_LP_BACKENDS = ("GLOP", "CLP", "PDLP")
 
 
 
@@ -311,7 +319,12 @@ def _factor_maps(transport: pd.DataFrame) -> Tuple[Dict[Tuple[str, str], float],
     ef: Dict[Tuple[str, str], float] = {}
     for _, row in transport.iterrows():
         key = (str(row["transport_mode"]), str(row["region_class"]))
-        cost[key] = float(row["transport_cost_eur_per_kgkm"])
+        raw_cost = float(row["transport_cost_eur_per_kgkm"])
+        economically_available = int(row.get("economically_available", 1)) == 1
+        if economically_available:
+            cost[key] = raw_cost
+        else:
+            cost[key] = min(raw_cost, PROHIBITIVE_TRANSPORT_COST_EUR_PER_KGKM)
         ef[key] = float(row["transport_ef_kgco2_per_kgkm"])
     return cost, ef
 
@@ -1069,17 +1082,15 @@ def build_pdf_route_lp_model(
 
 
 
-def _create_ortools_lp_solver() -> Tuple[pywraplp.Solver, str]:
-    """Create the same continuous LP with an OR-Tools backend.
-
-    GLOP is the primary backend. CLP and PDLP are fallbacks for environments
-    where a particular backend is unavailable.
-    """
-    for solver_name in ("GLOP", "CLP", "PDLP"):
+def _create_ortools_lp_solver(backend: Optional[str] = None) -> Tuple[pywraplp.Solver, str]:
+    """Create a continuous LP solver, optionally requesting one backend."""
+    candidates = (str(backend),) if backend else ORTOOLS_LP_BACKENDS
+    for solver_name in candidates:
         solver = pywraplp.Solver.CreateSolver(solver_name)
         if solver is not None:
             return solver, solver_name
-    raise RuntimeError("OR-Tools LP solver is unavailable. Install the 'ortools' package.")
+    requested = str(backend) if backend else ", ".join(ORTOOLS_LP_BACKENDS)
+    raise RuntimeError(f"OR-Tools LP solver is unavailable: {requested}")
 
 
 def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None:
@@ -1090,58 +1101,8 @@ def _set_solver_time_limit(solver: pywraplp.Solver, time_limit_sec: int) -> None
         solver.set_time_limit(milliseconds)
 
 
-def solve_lp_model(
-    model: LPModel,
-    time_limit_sec: int = 180,
-    objective_override: Optional[np.ndarray] = None,
-) -> SolveResult:
-    started = time.perf_counter()
-    solver, solver_name = _create_ortools_lp_solver()
-    _set_solver_time_limit(solver, time_limit_sec)
-    try:
-        solver.SetNumThreads(1)
-    except Exception:
-        pass
-
-    infinity = solver.infinity()
-    variables = []
-    for i in range(model.layout.n_vars):
-        lower = float(model.lb[i])
-        upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
-        variables.append(solver.NumVar(lower, upper, ""))
-
-    coefficients = model.c if objective_override is None else np.asarray(objective_override, dtype=float)
-    objective = solver.Objective()
-    for idx in np.flatnonzero(coefficients):
-        objective.SetCoefficient(variables[int(idx)], float(coefficients[int(idx)]))
-    objective.SetMinimization()
-
-    rows = model.rows
-    for row_index, rhs in enumerate(rows.eq_rhs):
-        constraint = solver.Constraint(float(rhs), float(rhs), "")
-        start = rows.eq_starts[row_index]
-        stop = rows.eq_starts[row_index + 1]
-        for position in range(start, stop):
-            constraint.SetCoefficient(
-                variables[rows.eq_cols[position]], rows.eq_data[position]
-            )
-
-    for row_index, rhs in enumerate(rows.ub_rhs):
-        constraint = solver.Constraint(-infinity, float(rhs), "")
-        start = rows.ub_starts[row_index]
-        stop = rows.ub_starts[row_index + 1]
-        for position in range(start, stop):
-            constraint.SetCoefficient(
-                variables[rows.ub_cols[position]], rows.ub_data[position]
-            )
-
-    # OR-Tools now owns the coefficient matrix. Release Python-side coefficient lists
-    # before Solve() to lower peak memory on Streamlit Community Cloud.
-    rows.clear_coefficients()
-
-    status_code = int(solver.Solve())
-    wall = time.perf_counter() - started
-    status_map = {
+def _ortools_status_map() -> Dict[int, str]:
+    return {
         int(pywraplp.Solver.OPTIMAL): "OPTIMAL",
         int(pywraplp.Solver.FEASIBLE): "FEASIBLE",
         int(pywraplp.Solver.INFEASIBLE): "INFEASIBLE",
@@ -1150,48 +1111,182 @@ def solve_lp_model(
         int(getattr(pywraplp.Solver, "MODEL_INVALID", 5)): "MODEL_INVALID",
         int(pywraplp.Solver.NOT_SOLVED): "NOT_SOLVED",
     }
-    status = status_map.get(status_code, f"STATUS_{status_code}")
-    has_solution = status_code in {
-        int(pywraplp.Solver.OPTIMAL),
-        int(pywraplp.Solver.FEASIBLE),
-    }
 
-    solution = None
-    objective_value = None
-    if has_solution:
-        solution = np.fromiter(
-            (variable.solution_value() for variable in variables),
-            dtype=float,
-            count=len(variables),
-        )
-        objective_value = float(objective.Value())
 
-    try:
-        iterations = int(solver.iterations())
-    except Exception:
-        iterations = 0
-    try:
-        solver_version = str(solver.SolverVersion())
-    except Exception:
-        solver_version = solver_name
+def solve_lp_model(
+    model: LPModel,
+    time_limit_sec: int = 180,
+    objective_override: Optional[np.ndarray] = None,
+) -> SolveResult:
+    """Solve the LP with scaled objective coefficients and automatic fallback.
 
+    Uniform objective scaling does not change the optimal solution. It prevents
+    the inactive-route penalty from making the model numerically ill-conditioned.
+    GLOP is attempted first; CLP and PDLP are used only when a backend reports an
+    abnormal/invalid/not-solved state.
+    """
+    started_total = time.perf_counter()
+    coefficients = (
+        model.c if objective_override is None
+        else np.asarray(objective_override, dtype=float)
+    )
+    if coefficients.shape != (model.layout.n_vars,):
+        raise ValueError("objective coefficient vector has an invalid shape")
+    if not np.isfinite(coefficients).all():
+        raise ValueError("objective coefficient vector contains NaN or infinity")
+
+    nonzero = np.abs(coefficients[np.nonzero(coefficients)])
+    max_abs = float(nonzero.max()) if nonzero.size else 1.0
+    objective_scale = max(1.0, max_abs / OBJECTIVE_TARGET_MAX_COEFFICIENT)
+    scaled_coefficients = coefficients / objective_scale
+
+    status_map = _ortools_status_map()
+    attempts: List[str] = []
+    last_status = "NOT_SOLVED"
+    last_status_code = int(pywraplp.Solver.NOT_SOLVED)
+    last_solver_name = "NONE"
+    last_solver_version = "unavailable"
+    last_iterations = 0
+
+    for backend in ORTOOLS_LP_BACKENDS:
+        elapsed = time.perf_counter() - started_total
+        remaining = max(1, int(math.ceil(float(time_limit_sec) - elapsed)))
+        try:
+            solver, solver_name = _create_ortools_lp_solver(backend)
+        except RuntimeError:
+            attempts.append(f"{backend}=UNAVAILABLE")
+            continue
+
+        last_solver_name = solver_name
+        _set_solver_time_limit(solver, remaining)
+        try:
+            solver.SetNumThreads(1)
+        except Exception:
+            pass
+
+        infinity = solver.infinity()
+        variables = []
+        for i in range(model.layout.n_vars):
+            lower = float(model.lb[i])
+            upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
+            variables.append(solver.NumVar(lower, upper, ""))
+
+        objective = solver.Objective()
+        for idx in np.flatnonzero(scaled_coefficients):
+            objective.SetCoefficient(variables[int(idx)], float(scaled_coefficients[int(idx)]))
+        objective.SetMinimization()
+
+        rows = model.rows
+        for row_index, rhs in enumerate(rows.eq_rhs):
+            constraint = solver.Constraint(float(rhs), float(rhs), "")
+            row_start = rows.eq_starts[row_index]
+            row_stop = rows.eq_starts[row_index + 1]
+            for position in range(row_start, row_stop):
+                constraint.SetCoefficient(
+                    variables[rows.eq_cols[position]], rows.eq_data[position]
+                )
+
+        for row_index, rhs in enumerate(rows.ub_rhs):
+            constraint = solver.Constraint(-infinity, float(rhs), "")
+            row_start = rows.ub_starts[row_index]
+            row_stop = rows.ub_starts[row_index + 1]
+            for position in range(row_start, row_stop):
+                constraint.SetCoefficient(
+                    variables[rows.ub_cols[position]], rows.ub_data[position]
+                )
+
+        status_code = int(solver.Solve())
+        status = status_map.get(status_code, f"STATUS_{status_code}")
+        last_status = status
+        last_status_code = status_code
+        try:
+            iterations = int(solver.iterations())
+        except Exception:
+            iterations = 0
+        last_iterations = iterations
+        try:
+            solver_version = str(solver.SolverVersion())
+        except Exception:
+            solver_version = solver_name
+        last_solver_version = solver_version
+        attempts.append(f"{solver_name}={status}")
+
+        has_solution = status_code in {
+            int(pywraplp.Solver.OPTIMAL),
+            int(pywraplp.Solver.FEASIBLE),
+        }
+        if has_solution:
+            solution = np.fromiter(
+                (variable.solution_value() for variable in variables),
+                dtype=float,
+                count=len(variables),
+            )
+            # Report the original, unscaled objective value.
+            objective_value = float(np.dot(coefficients, solution))
+            wall = time.perf_counter() - started_total
+            message = (
+                f"{status} with OR-Tools {solver_version}; "
+                f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}; "
+                f"objective_scale={objective_scale:.6g}; attempts={' -> '.join(attempts)}"
+            )
+            return SolveResult(
+                status=status,
+                message=message,
+                objective_value=objective_value,
+                wall_time_sec=wall,
+                x=solution,
+                model=model,
+                ortools_status=status_code,
+                solver_name=solver_name,
+                solver_version=solver_version,
+                iterations=iterations,
+            )
+
+        # INFEASIBLE and UNBOUNDED are model conclusions, not backend failures.
+        if status in {"INFEASIBLE", "UNBOUNDED"}:
+            wall = time.perf_counter() - started_total
+            message = (
+                f"{status} with OR-Tools {solver_version}; "
+                f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}; "
+                f"objective_scale={objective_scale:.6g}; attempts={' -> '.join(attempts)}"
+            )
+            return SolveResult(
+                status=status,
+                message=message,
+                objective_value=None,
+                wall_time_sec=wall,
+                x=None,
+                model=model,
+                ortools_status=status_code,
+                solver_name=solver_name,
+                solver_version=solver_version,
+                iterations=iterations,
+            )
+
+        # ABNORMAL / MODEL_INVALID / NOT_SOLVED: release this backend and try the next.
+        variables = []
+        solver = None
+        gc.collect()
+
+    wall = time.perf_counter() - started_total
     message = (
-        f"{status} with OR-Tools {solver_version}; "
-        f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}"
+        f"{last_status}; no OR-Tools backend returned a usable solution; "
+        f"variables={model.layout.n_vars:,}, "
+        f"constraints={model.equality_count + model.inequality_count:,}; "
+        f"objective_scale={objective_scale:.6g}; attempts={' -> '.join(attempts) or 'none'}"
     )
     return SolveResult(
-        status=status,
+        status=last_status,
         message=message,
-        objective_value=objective_value,
+        objective_value=None,
         wall_time_sec=wall,
-        x=solution,
+        x=None,
         model=model,
-        ortools_status=status_code,
-        solver_name=solver_name,
-        solver_version=solver_version,
-        iterations=iterations,
+        ortools_status=last_status_code,
+        solver_name=last_solver_name,
+        solver_version=last_solver_version,
+        iterations=last_iterations,
     )
-
 
 def total_emission_objective(model: LPModel) -> np.ndarray:
     obj = np.zeros(model.layout.n_vars, dtype=float)
@@ -1891,13 +1986,8 @@ def explain_table(
     column_meanings: Mapping[str, str],
     value_meaning: str,
 ) -> None:
-    """Attach an explanation for the rows, columns and values of a table."""
-    with st.expander(f"{title}: 행·열·값 읽는 방법", expanded=False):
-        st.markdown(f"**행의 의미**: {row_meaning}")
-        st.markdown("**열의 의미**")
-        for name, meaning in column_meanings.items():
-            st.markdown(f"- `{name}`: {meaning}")
-        st.markdown(f"**값의 의미**: {value_meaning}")
+    """Compatibility no-op: table-reading expanders are intentionally hidden."""
+    return None
 
 
 def show_explained_dataframe(
@@ -1905,12 +1995,9 @@ def show_explained_dataframe(
     title: str,
     row_meaning: str,
     column_meanings: Optional[Mapping[str, str]] = None,
-    value_meaning: str = "각 값은 해당 행의 대상과 열의 지표가 만나는 실제 입력값 또는 최적화 결과값입니다.",
+    value_meaning: str = "",
 ) -> None:
     st.dataframe(df, hide_index=True, use_container_width=True)
-    meanings = dict(column_meanings or {str(c): f"{c} 항목" for c in df.columns})
-    explain_table(title, row_meaning, meanings, value_meaning)
-
 
 def render_formula_table(
     title: str,
@@ -1936,12 +2023,6 @@ def render_formula_table(
             else:
                 col.markdown(str(value))
         st.divider()
-    explain_table(
-        title,
-        row_explanation,
-        {h: f"{h} 열의 정의와 해석" for h in headers},
-        value_explanation,
-    )
 
 
 def render_map_legend_outside() -> None:
@@ -3230,6 +3311,24 @@ def render_country_selection_by_material(
 
 
 def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
+    st.header("전기자동차 공급망·탄소 최적화 SaaS 개요")
+    st.markdown(
+        """
+회사에서는 6종류 전기자동차의 총수요에 대하여 **보조금 점수를 만족하는 정책하에서**,
+24개 국가에서 전기자동차를 생산하여 프랑스 수요를 충족하는 **생산·운송·조립의 총 공급망 비용을 최소화하는 공급망 구조**를 나타냅니다.
+6종류 전기자동차는 차량 크기(소형/중형/대형)와 배터리 용량(미드레인지/롱레인지)으로 구성됩니다.
+
+프랑스 전기차 보조금 제도의 점수 기준에 따라 총 3가지 시나리오를 비교합니다.
+
+- **시나리오 ①**: 보조금 정책이 없는 회사 공급망(baseline)
+- **시나리오 ②**: 보조금 탄소점수 60점 기준
+- **시나리오 ③**: 보조금 탄소점수 65점 기준
+
+각 시나리오에서 라인 생산 방식과 모듈 활용 분산 생산 방식을 각각 최적화하여,
+최적 공급망 비용, 회사 총탄소배출량, 생산국가·조립국가·운송수단·운송경로와 물량을 비교합니다.
+        """
+    )
+
     st.markdown("## Input과 Output")
     c1, c2 = st.columns(2)
     with c1:
@@ -3265,7 +3364,6 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
         ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 차량 종류별 수요를 충족"],
     ], columns=["Stage", "Stage description", "세부내용"])
     st.dataframe(modular, use_container_width=True, hide_index=True)
-
 
 
 def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
@@ -3565,7 +3663,7 @@ def run_app():
     st.set_page_config(page_title="PDF 기반 전기차 공급망 Route LP", page_icon="🚗", layout="wide")
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
-    st.caption("build: pdf-country-route-fixed-score-fleet-total-v8.14 · 배터리 50/55/65/70/80/85 kWh · S2=60/S3=65 · 비용 입력표 표시")
+    st.caption("build: pdf-country-route-fixed-score-fleet-total-v8.15 · 배터리 50/55/65/70/80/85 kWh · S2=60/S3=65 · Solver 수치안정화")
 
     defaults = load_default_tables()
     with st.sidebar:
@@ -3588,7 +3686,7 @@ def run_app():
         st.stop()
 
     tabs = st.tabs([
-        "1. Input·Output 및 생산방식",
+        "1. SaaS 최적화 프레임워크 개요",
         "2. PDF·입력 데이터와 비용 파라미터",
         "3. 최적화 실행",
         "4. 포스터형 최적화 결과",
@@ -3666,32 +3764,33 @@ def run_app():
                 st.session_state.pop("results_zip_bytes", None)
                 box.success("6개 조합 계산이 완료되었습니다.")
 
-        st.markdown("### 고정 점수 민감도")
-        with st.expander("선택 생산방식의 고정 점수별 비용·배출량 계산", expanded=False):
-            scores = st.multiselect("평가할 점수", [0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80], default=[60,65,70,75,80])
-            if st.button("고정 점수 민감도 실행", disabled=not selection_valid or not scores):
-                rows = []; prog = st.progress(0.0); box = st.empty()
-                for i, score in enumerate(sorted(scores), start=1):
-                    box.info(f"{score}점 고정 상한 계산 중 ({i}/{len(scores)})")
-                    try:
-                        res = solve_case(
-                            tables, "S2", production_mode, int(time_limit),
-                            score_override=float(score), selected_country_map=selected_country_map,
-                        )
-                        rows.append({
-                            "score": score,
-                            "small_cap_kgco2_per_vehicle": carbon_cap_from_score("small", score),
-                            "standard_cap_kgco2_per_vehicle": carbon_cap_from_score("standard", score),
-                            "status": res.get("status"),
-                            "supply_chain_cost_eur": res.get("objective_value"),
-                            "company_total_emissions_kgco2": res.get("total_emissions_kgco2"),
-                            "wall_time_sec": res.get("wall_time_sec"),
-                        })
-                    except Exception as exc:
-                        rows.append({"score": score, "status": "ERROR", "message": str(exc)})
-                    prog.progress(i / len(scores)); gc.collect()
-                st.session_state["score_sensitivity"] = pd.DataFrame(rows)
-                box.success("고정 점수 민감도 계산 완료")
+        # [UI 비활성화] 고정 점수 민감도 실행 영역은 요청에 따라 주석 처리했습니다.
+        # st.markdown("### 고정 점수 민감도")
+        # with st.expander("선택 생산방식의 고정 점수별 비용·배출량 계산", expanded=False):
+        #     scores = st.multiselect("평가할 점수", [0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80], default=[60,65,70,75,80])
+        #     if st.button("고정 점수 민감도 실행", disabled=not selection_valid or not scores):
+        #         rows = []; prog = st.progress(0.0); box = st.empty()
+        #         for i, score in enumerate(sorted(scores), start=1):
+        #             box.info(f"{score}점 고정 상한 계산 중 ({i}/{len(scores)})")
+        #             try:
+        #                 res = solve_case(
+        #                     tables, "S2", production_mode, int(time_limit),
+        #                     score_override=float(score), selected_country_map=selected_country_map,
+        #                 )
+        #                 rows.append({
+        #                     "score": score,
+        #                     "small_cap_kgco2_per_vehicle": carbon_cap_from_score("small", score),
+        #                     "standard_cap_kgco2_per_vehicle": carbon_cap_from_score("standard", score),
+        #                     "status": res.get("status"),
+        #                     "supply_chain_cost_eur": res.get("objective_value"),
+        #                     "company_total_emissions_kgco2": res.get("total_emissions_kgco2"),
+        #                     "wall_time_sec": res.get("wall_time_sec"),
+        #                 })
+        #             except Exception as exc:
+        #                 rows.append({"score": score, "status": "ERROR", "message": str(exc)})
+        #             prog.progress(i / len(scores)); gc.collect()
+        #         st.session_state["score_sensitivity"] = pd.DataFrame(rows)
+        #         box.success("고정 점수 민감도 계산 완료")
 
     with tabs[3]:
         st.header("포스터형 최적화 결과")
@@ -3747,21 +3846,22 @@ def run_app():
                 if isinstance(st.session_state.get("results_zip_bytes"), (bytes, bytearray)):
                     st.download_button("전체 결과 ZIP 다운로드", st.session_state["results_zip_bytes"], file_name="v810_results.zip", mime="application/zip")
 
-            sensitivity = st.session_state.get("score_sensitivity")
-            if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
-                st.markdown("### 고정 점수 민감도 결과")
-                show_explained_dataframe(sensitivity, "점수 민감도", "각 행은 하나의 고정 정책점수입니다.", value_meaning="OPTIMAL 행의 비용은 순수 공급망 비용이고 배출량은 회사 총배출량입니다.")
-                valid = sensitivity[(sensitivity["status"] == "OPTIMAL") & sensitivity["supply_chain_cost_eur"].notna()].sort_values("score")
-                if not valid.empty:
-                    import altair as alt
-                    y_min = float(valid["supply_chain_cost_eur"].min()); y_max = float(valid["supply_chain_cost_eur"].max())
-                    pad = max((y_max-y_min)*0.08, abs(y_min)*0.005, 1.0)
-                    chart = alt.Chart(valid).mark_line(point=True).encode(
-                        x=alt.X("score:Q", title="정책점수"),
-                        y=alt.Y("supply_chain_cost_eur:Q", title="최적 공급망 비용 (€)", scale=alt.Scale(domain=[y_min-pad,y_max+pad], zero=False)),
-                        tooltip=[alt.Tooltip("score:Q"), alt.Tooltip("supply_chain_cost_eur:Q", format=",.0f"), alt.Tooltip("company_total_emissions_kgco2:Q", format=",.0f")],
-                    ).properties(height=360)
-                    st.altair_chart(chart, use_container_width=True)
+            # [UI 비활성화] 고정 점수 민감도 결과 영역도 화면에서 숨겼습니다.
+            # sensitivity = st.session_state.get("score_sensitivity")
+            # if isinstance(sensitivity, pd.DataFrame) and not sensitivity.empty:
+            #     st.markdown("### 고정 점수 민감도 결과")
+            #     show_explained_dataframe(sensitivity, "점수 민감도", "각 행은 하나의 고정 정책점수입니다.", value_meaning="OPTIMAL 행의 비용은 순수 공급망 비용이고 배출량은 회사 총배출량입니다.")
+            #     valid = sensitivity[(sensitivity["status"] == "OPTIMAL") & sensitivity["supply_chain_cost_eur"].notna()].sort_values("score")
+            #     if not valid.empty:
+            #         import altair as alt
+            #         y_min = float(valid["supply_chain_cost_eur"].min()); y_max = float(valid["supply_chain_cost_eur"].max())
+            #         pad = max((y_max-y_min)*0.08, abs(y_min)*0.005, 1.0)
+            #         chart = alt.Chart(valid).mark_line(point=True).encode(
+            #             x=alt.X("score:Q", title="정책점수"),
+            #             y=alt.Y("supply_chain_cost_eur:Q", title="최적 공급망 비용 (€)", scale=alt.Scale(domain=[y_min-pad,y_max+pad], zero=False)),
+            #             tooltip=[alt.Tooltip("score:Q"), alt.Tooltip("supply_chain_cost_eur:Q", format=",.0f"), alt.Tooltip("company_total_emissions_kgco2:Q", format=",.0f")],
+            #         ).properties(height=360)
+            #         st.altair_chart(chart, use_container_width=True)
 
             available = [k for k,v in results.items() if v.get("status") == "OPTIMAL"]
             if available:
