@@ -1,4 +1,4 @@
-# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_10
+# DEPLOYMENT_MARKER: PDF_COUNTRY_ROUTE_LP_V8_18_UI_APP7_MODEL
 from __future__ import annotations
 
 import base64
@@ -30,8 +30,8 @@ APP_DIR = Path(__file__).resolve().parent
 ASSET_DIR = APP_DIR / "assets"
 REFERENCE_DIR = APP_DIR / "reference"
 
-APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.17"
-APP_PACKAGE_ID = "20260805-v8.17-single-file-embedded-data-five-tabs"
+APP_BUILD = "pdf-country-route-fixed-score-fleet-total-v8.18"
+APP_PACKAGE_ID = "20260805-v8.18-current-ui-app7-model-unscaled-glop"
 REFERENCE_LP_SHA256 = "efe0ec2e80a26b07dcbec47d2eaf74fb300cd63a5014e81e90147f9581ba4244"
 
 REQUIRED_FILES = [
@@ -52,93 +52,96 @@ REQUIRED_FILES = [
 # This makes carbon_demo/app.py deployable by itself: no data/ directory,
 # file upload, or repository-relative path is required at runtime.
 EMBEDDED_DATA_ZIP_B64 = (
-    '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'
-    'AA=='
+    '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'
 )
-EMBEDDED_DATA_SHA256 = "b60a38802d4d48af1b33ed5f92d306c03ee1dab1e7ddeb5ca825fe6854f1b4a0"
+EMBEDDED_DATA_SHA256 = "69d7e7fa2cf1c788b0c90cfaa6ffe64ce288224b917fd94b2d87bcced6dd3362"
 
 MATERIALS = ["steel", "aluminum", "other", "battery"]
 MATERIAL_INDEX = {m: i for i, m in enumerate(MATERIALS)}
@@ -195,18 +198,6 @@ MIN_DISTANCE_KM = 0.0
 INTERNATIONAL_INLAND_LEG_KM = 50.0
 FLOW_TOL = 1e-6
 MAX_SENSITIVITY_POINTS = 5
-
-# Source CSV parameter values are never rewritten by the solver layer.
-# A single positive constant rescales the complete objective before GLOP; this
-# leaves the feasible region and the minimizer unchanged. The reported objective
-# is always reconstructed with the original, unscaled CSV coefficients.
-OBJECTIVE_TARGET_MAX_COEFFICIENT = 1_000_000.0
-GLOP_PARAMETER_TEXT = """
-use_scaling: true
-primal_feasibility_tolerance: 1e-8
-dual_feasibility_tolerance: 1e-9
-solution_feasibility_tolerance: 1e-7
-"""
 
 
 
@@ -1185,17 +1176,14 @@ def _ortools_status_map() -> Dict[int, str]:
     }
 
 
+# Solver formulation restored from the uploaded app(7).py.
+# The original objective coefficients are passed directly to the GLOP model;
+# no application-side uniform objective scaling is applied.
 def solve_lp_model(
     model: LPModel,
     time_limit_sec: int = 180,
     objective_override: Optional[np.ndarray] = None,
 ) -> SolveResult:
-    """Solve one continuous LP with GLOP and unchanged CSV parameters.
-
-    The full objective vector is divided by one positive constant before it is
-    passed to GLOP. Uniform scaling cannot change the minimizer. After solving,
-    the objective is recomputed from the original coefficients and solution.
-    """
     started = time.perf_counter()
     solver, solver_name = _create_ortools_lp_solver()
     _set_solver_time_limit(solver, time_limit_sec)
@@ -1203,25 +1191,6 @@ def solve_lp_model(
         solver.SetNumThreads(1)
     except Exception:
         pass
-    try:
-        solver.SetSolverSpecificParametersAsString(GLOP_PARAMETER_TEXT)
-    except Exception:
-        # Older OR-Tools releases still use GLOP's default internal scaling.
-        pass
-
-    coefficients = (
-        model.c if objective_override is None
-        else np.asarray(objective_override, dtype=float)
-    )
-    if coefficients.shape != (model.layout.n_vars,):
-        raise ValueError("objective coefficient vector has an invalid shape")
-    if not np.isfinite(coefficients).all():
-        raise ValueError("objective coefficient vector contains NaN or infinity")
-
-    nonzero = np.abs(coefficients[np.nonzero(coefficients)])
-    max_abs = float(nonzero.max()) if nonzero.size else 1.0
-    objective_scale = max(1.0, max_abs / OBJECTIVE_TARGET_MAX_COEFFICIENT)
-    scaled_coefficients = coefficients / objective_scale
 
     infinity = solver.infinity()
     variables = []
@@ -1230,38 +1199,47 @@ def solve_lp_model(
         upper = float(model.ub[i]) if np.isfinite(model.ub[i]) else infinity
         variables.append(solver.NumVar(lower, upper, ""))
 
+    coefficients = model.c if objective_override is None else np.asarray(objective_override, dtype=float)
     objective = solver.Objective()
-    for idx in np.flatnonzero(scaled_coefficients):
-        objective.SetCoefficient(
-            variables[int(idx)], float(scaled_coefficients[int(idx)])
-        )
+    for idx in np.flatnonzero(coefficients):
+        objective.SetCoefficient(variables[int(idx)], float(coefficients[int(idx)]))
     objective.SetMinimization()
 
     rows = model.rows
     for row_index, rhs in enumerate(rows.eq_rhs):
         constraint = solver.Constraint(float(rhs), float(rhs), "")
-        row_start = rows.eq_starts[row_index]
-        row_stop = rows.eq_starts[row_index + 1]
-        for position in range(row_start, row_stop):
+        start = rows.eq_starts[row_index]
+        stop = rows.eq_starts[row_index + 1]
+        for position in range(start, stop):
             constraint.SetCoefficient(
                 variables[rows.eq_cols[position]], rows.eq_data[position]
             )
 
     for row_index, rhs in enumerate(rows.ub_rhs):
         constraint = solver.Constraint(-infinity, float(rhs), "")
-        row_start = rows.ub_starts[row_index]
-        row_stop = rows.ub_starts[row_index + 1]
-        for position in range(row_start, row_stop):
+        start = rows.ub_starts[row_index]
+        stop = rows.ub_starts[row_index + 1]
+        for position in range(start, stop):
             constraint.SetCoefficient(
                 variables[rows.ub_cols[position]], rows.ub_data[position]
             )
 
-    # OR-Tools owns the coefficient matrix after SetCoefficient calls.
+    # OR-Tools now owns the coefficient matrix. Release Python-side coefficient lists
+    # before Solve() to lower peak memory on Streamlit Community Cloud.
     rows.clear_coefficients()
 
     status_code = int(solver.Solve())
     wall = time.perf_counter() - started
-    status = _ortools_status_map().get(status_code, f"STATUS_{status_code}")
+    status_map = {
+        int(pywraplp.Solver.OPTIMAL): "OPTIMAL",
+        int(pywraplp.Solver.FEASIBLE): "FEASIBLE",
+        int(pywraplp.Solver.INFEASIBLE): "INFEASIBLE",
+        int(pywraplp.Solver.UNBOUNDED): "UNBOUNDED",
+        int(pywraplp.Solver.ABNORMAL): "ABNORMAL",
+        int(getattr(pywraplp.Solver, "MODEL_INVALID", 5)): "MODEL_INVALID",
+        int(pywraplp.Solver.NOT_SOLVED): "NOT_SOLVED",
+    }
+    status = status_map.get(status_code, f"STATUS_{status_code}")
     has_solution = status_code in {
         int(pywraplp.Solver.OPTIMAL),
         int(pywraplp.Solver.FEASIBLE),
@@ -1275,7 +1253,7 @@ def solve_lp_model(
             dtype=float,
             count=len(variables),
         )
-        objective_value = float(np.dot(coefficients, solution))
+        objective_value = float(objective.Value())
 
     try:
         iterations = int(solver.iterations())
@@ -1288,8 +1266,7 @@ def solve_lp_model(
 
     message = (
         f"{status} with OR-Tools {solver_version}; "
-        f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}; "
-        f"uniform_objective_scale={objective_scale:.12g}; backend=GLOP-only"
+        f"variables={solver.NumVariables():,}, constraints={solver.NumConstraints():,}"
     )
     return SolveResult(
         status=status,
@@ -3823,7 +3800,7 @@ def run_app():
     apply_global_font_scale()
     st.title("탄소배출 기반 전기차 공급망 최적화")
     st.caption(
-        "build: pdf-country-route-fixed-score-fleet-total-v8.17 · "
+        "build: pdf-country-route-fixed-score-fleet-total-v8.18 · "
         "S2=60/S3=65 · GLOP 전용"
     )
 
@@ -3971,3 +3948,4 @@ if __name__ == "__main__":
     if st is None:
         raise RuntimeError("Streamlit is not installed. Install requirements.txt and run: streamlit run app.py")
     run_app()
+
