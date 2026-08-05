@@ -4082,16 +4082,14 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     st.header("전기자동차 공급망·탄소 최적화 SaaS 개요")
     st.markdown(
         """
-이 SaaS는 여러 국가에서 6개 전기자동차 트림을 생산하여 프랑스 수요를 정확히 충족하는 공급망을 설계합니다.
-각 시나리오에서 **생산·운송·조립의 총 공급망 비용을 최소화**하며, 정책 시나리오에서는 회사 전체 차량의
-총탄소배출량이 60점·65점에 대응하는 fleet-total 탄소예산 이하가 되어야 합니다.
+회사에서는 6종류 전기자동차의 총 수요에 대하여 **보조금 점수를 만족하는 정책하**에서, 24개 국가에서 전기자동차를 생산하여 프랑스 수요를 충족하는 **생산·운송·조립의 총 공급망 비용을 최소화하는 공급망 구조**를 나타냅니다.
+6종류 전기자동차는 차량크기(소형/중형/대형)와 배터리 용량(미드레인지/롱레인지)로 이루어져있습니다. 
 
-- **시나리오 ①**: 탄소점수 제약이 없는 회사 baseline
-- **시나리오 ②**: 60점 고정 상한
-- **시나리오 ③**: 65점 고정 상한
+프랑스 전기차 보조금 제도의 점수 기준에 따라 시나리오 구성이 다르며, 총 3가지 시나리오로 구성되어 있습니다. 
 
-점수는 자동으로 낮추지 않습니다. 각 시나리오는 지정된 점수에서 독립적인 비용 최소 LP로 계산되며,
-`OPTIMAL`은 그 제약 아래에서 가장 저렴한 공급망임을 뜻합니다.
+- **시나리오 ①**: 보조금 정책이 없는 회사 (baseline)
+- **시나리오 ②**: 60점 
+- **시나리오 ③**: 65점 
         """
     )
 
@@ -4099,56 +4097,34 @@ def render_overview_tab(tables: Mapping[str, pd.DataFrame]):
     c1, c2 = st.columns(2)
     with c1:
         inputs = pd.DataFrame([
-            ["차량·수요", "6개 트림의 질량, 배터리용량, 재질 필요량, 프랑스 수요"],
-            ["재질별 생산국가", "철강·알루미늄·기타 원자재·배터리/모듈별 허용 국가"],
-            ["차량 조립국가", "배터리를 제외한 차체 중간가공과 완성차 조립 허용 국가"],
-            ["배터리 제조조립", "생산국가별 배터리팩/모듈 질량기반 제조조립 비용·EF"],
-            ["비용·배출계수", "국가별 생산·조립 계수와 운송수단·권역별 계수"],
+            ["차량 구성요소 질량 및 수요량", "6개 차량종류의 질량, 배터리용량, 배터리 제외 재질별 필요량, 프랑스 수요"],
+            ["재질별 생산국가 질량기반 배출계수", "철강/알루미늄/기타 원자재/배터리 국가 배출계수"],
+            ["차량 조립국가 질량기반 배출계수", "배터리를 제외한 차체 중간가공 및 완성차 조립 국가 배출계수"],
+            ["배터리 생산과 관련된 질량기반 배출계수", "생산국가별 배터리팩 및 배터리 모듈 질량 기반 생산과 관련된 비용 및 배출계수"],
+            ["생산 및 ", "국가별 운송수단별 질량기반 배출계수"],
+            ["생산/조립/운송 질량기반 비용", "비용"],
             ["정책 시나리오", "무정책, 60점, 65점"],
-        ], columns=["Input", "사용자 관점의 의미"])
-        show_explained_dataframe(inputs, "Input", "각 행은 하나의 입력 그룹입니다.", value_meaning="오른쪽 열은 최적화에 들어가는 구체적인 입력입니다.")
+        ], columns=["Input", "Description"])
     with c2:
         outputs = pd.DataFrame([
-            ["최적 공급망 비용", "고정된 시나리오 제약 아래 생산·운송·조립 비용의 최소값"],
-            ["트림별 탄소배출량", "각 차량 트림 1대당 실제 배출량과 차급별 참고상한"],
-            ["회사 총탄소배출량", "모든 트림의 실제 배출량 합계이며 정책 탄소제약의 좌변"],
-            ["공급망 구조", "재질/배터리 생산국가, 차량 조립국가, 운송경로와 물량"],
-            ["생산방식 비교", "라인과 모듈 방식의 비용·배출량·경로 차이"],
-        ], columns=["Output", "사용자 관점의 의미"])
-        show_explained_dataframe(outputs, "Output", "각 행은 하나의 결과 그룹입니다.", value_meaning="오른쪽 열은 사용자가 해석할 결과입니다.")
+            ["최적 공급망 비용", "보조금 정책 시나리오에서의 생산+운송+조립 비용의 최소값"],
+            ["회사 총 탄소배출량", "보조금 정책 시나리오에서 발생하는 총 탄소배출량"],
+            ["생산방식에 따른 공급망 구조", "생산방식에 따른 재질별/배터리팩 및 배터리모듈 생산국가, 차량 조립국가, 운송수단 종류/경로와 물량"],
+        ], columns=["Output", "Description"])
 
-    st.markdown("### 정책점수와 fleet-total 탄소예산")
-    score_table = pd.DataFrame([
-        [60, carbon_cap_from_score("small", 60), carbon_cap_from_score("standard", 60)],
-        [65, carbon_cap_from_score("small", 65), carbon_cap_from_score("standard", 65)],
-        [70, carbon_cap_from_score("small", 70), carbon_cap_from_score("standard", 70)],
-    ], columns=["고정 점수", "기타차량 상한(kg CO₂-eq/대)", "기준차량 상한(kg CO₂-eq/대)"])
-    show_explained_dataframe(
-        score_table, "시나리오별 점수 상한",
-        "각 행은 하나의 정책 시나리오에 적용되는 점수입니다.",
-        value_meaning="각 차량분류의 1대당 기준값에 트림별 수요를 곱해 모두 합산한 값이 회사 전체 탄소예산이 됩니다.",
-    )
-
-    st.markdown("### 라인 생산 방식: 3개 Stage")
+    st.markdown("### 라인 생산 방식: 3개 Stage로 구성")
     line = pd.DataFrame([
-        ["Stage 1", "재질·완성 배터리팩 생산", "철강·알루미늄·기타 원자재와 완성 배터리팩을 생산합니다. 배터리팩 제조조립 비용·배출량은 팩 질량과 생산국가 계수로 계산합니다."],
-        ["Stage 2", "차체 중간가공·차량 조립", "Stage 1의 비배터리 재질을 조립하고 같은 위치에서 생산된 완성 배터리팩을 차량에 결합합니다. 차량 조립계수는 비배터리 질량에만 적용됩니다."],
-        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족합니다."],
-    ], columns=["Stage", "공정", "코드가 결정하는 내용"])
-    show_explained_dataframe(line, "라인 생산 Stage", "각 행은 공급망의 한 단계입니다.", value_meaning="라인 방식에서는 완성팩 생산국가와 차량 조립국가가 동일합니다.")
+        ["Stage 1", "재질별 생산/배터리팩 생산", "철강/알루미늄/기타 원자재와 **완성 배터리팩**을 생산."],
+        ["Stage 2", "차체 중간가공 및 차량 조립", "Stage 1의 **비배터리 재질들을 조립하고 같은 위치에서 생산된 완성 배터리팩을 차량에 결합**."],
+        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하며, 차량 종류별 프랑스 수요지를 모두 만족."],
+    ], columns=["Stage", "Stage description", "세부내용"])
 
     st.markdown("### 모듈 활용 분산 생산 방식: 3개 Stage")
     modular = pd.DataFrame([
-        ["Stage 1", "재질·10/5kWh 모듈 생산", "철강·알루미늄·기타 원자재와 10/5kWh 모듈을 생산합니다. 모듈 제조조립 비용·배출량은 총 모듈 질량과 생산국가 계수로 계산합니다."],
-        ["Stage 2", "차체 중간가공·차량 조립", "모듈을 필요한 배터리용량으로 구성해 차량에 결합합니다. 별도의 모듈→팩 조립비·배출량은 없으며, 차량 조립계수는 비배터리 질량에만 적용됩니다."],
-        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하여 트림별 수요를 정확히 충족합니다."],
-    ], columns=["Stage", "공정", "코드가 결정하는 내용"])
-    show_explained_dataframe(modular, "모듈 분산 생산 Stage", "각 행은 공급망의 한 단계입니다.", value_meaning="모듈 생산국가 s와 차량 조립국가 p는 달라도 되며, s=p도 허용됩니다.")
-
-    st.success(
-        "두 방식은 동일한 배터리 기초 생산계수와 동일한 국가별 질량기반 제조조립계수를 사용합니다. "
-        "모듈 방식에만 추가 팩 조립비·배출량을 부과하지 않으며, 같은 국가를 선택하면 라인 방식의 배터리 흐름을 재현할 수 있습니다."
-    )
+        ["Stage 1", "재질별 생산/배터리모듈 (10/5kWh) 생산", "철강/알루미늄/기타 원자재와 배터리모듈 (10/5kWh) 모듈을 생산."],
+        ["Stage 2", "차체 중간가공 및 차량 조립", "**모듈을 필요한 배터리용량으로 구성해 차량에 결합. 별도의 모듈→팩 조립비·배출량은 없음**."],
+        ["Stage 3", "프랑스 시장", "완성차를 프랑스로 운송하며, 차량 종류별 프랑스 수요지를 모두 만족."],
+    ], columns=["Stage", "Stage description", "세부내용"])
 
 
 def render_math_model_tab_v89(tables: Mapping[str, pd.DataFrame]):
@@ -4386,21 +4362,13 @@ def _make_score_progress_callback(status_box, progress=None, prefix: str = ""):
 
 def render_cost_parameter_summary(tables: Mapping[str, pd.DataFrame]) -> None:
     st.markdown("### 비용 관련 CSV와 파라미터")
-    st.markdown(
-        "현재 목적함수의 비용은 세 입력 CSV에서 읽습니다. 제품 판매가격이나 구매자 보조금은 "
-        "목적함수에 포함하지 않으며, 생산·제조조립·운송 비용만 사용합니다."
-    )
+
     file_df = pd.DataFrame([
-        ["raw_material_suppliers.csv", "production_cost", "철강·알루미늄·기타 원자재는 €/kg, 배터리는 €/kWh", "재질·배터리 기초 생산비"],
-        ["assembly_locations.csv", "assembly_cost_eur_per_kg", "€/kg", "배터리를 제외한 차량 질량의 중간가공·조립비"],
-        ["assembly_locations.csv", "battery_manufacturing_assembly_cost_eur_per_kg", "€/kg", "완성 배터리팩 또는 10/5kWh 모듈의 질량기반 제조·조립비"],
-        ["transport_parameters.csv", "transport_cost_eur_per_kgkm", "€/(kg·km)", "부품·모듈 및 완제품 운송비"],
+        ["raw_material_suppliers.csv", "production_cost", "철강/알루미늄/기타 원자재: €/kg, 배터리: €/kWh", "재질 및 배터리 생산비"],
+        ["assembly_locations.csv", "assembly_cost_eur_per_kg", "€/kg", "배터리를 제외한 차량 질량 기반 중간가공/조립비"],
+        ["assembly_locations.csv", "battery_manufacturing_assembly_cost_eur_per_kg", "€/kg", "완성 배터리팩 또는 배터리모듈(10/5kWh)의 질량 기반 제조 및 조립비"],
+        ["transport_parameters.csv", "transport_cost_eur_per_kgkm", "€/(kg·km)", "질량과 이동경로 기반 운송비"],
     ], columns=["CSV 파일", "비용 열", "단위", "목적함수 항"])
-    show_explained_dataframe(
-        file_df, "비용 파라미터 파일 구조",
-        "각 행은 목적함수에 직접 들어가는 비용 입력열 하나입니다.",
-        value_meaning="비용 열 × 최적화 물량(및 거리·질량)을 계산해 총 공급망 비용을 구성합니다.",
-    )
 
     suppliers = tables["raw_material_suppliers.csv"]
     prod_cost = suppliers.groupby(["material_id", "parameter_unit"], as_index=False).agg(
@@ -4409,32 +4377,17 @@ def render_cost_parameter_summary(tables: Mapping[str, pd.DataFrame]) -> None:
         고유값_개수=("production_cost", "nunique"),
         국가행_개수=("location_name", "count"),
     )
-    show_explained_dataframe(
-        prod_cost, "재질·배터리 생산비 요약",
-        "각 행은 재질별 생산비의 범위와 입력행 수를 보여줍니다.",
-        value_meaning="생산비는 raw_material_suppliers.csv의 production_cost이며, 배터리는 kWh 단위, 나머지는 kg 단위입니다.",
-    )
 
     plants = tables["assembly_locations.csv"]
     assembly_cost = plants[[
         "location_name", "assembly_cost_eur_per_kg",
         "battery_manufacturing_assembly_cost_eur_per_kg", "source_basis"
     ]].copy()
-    show_explained_dataframe(
-        assembly_cost, "국가별 조립·배터리 제조조립 비용",
-        "각 행은 한 국가/위치의 질량당 비용입니다.",
-        value_meaning="차량 조립비는 비배터리 차량질량에, 배터리 제조조립비는 배터리 질량에 적용됩니다.",
-    )
 
     transport_cost = tables["transport_parameters.csv"][[
         "transport_mode", "transport_mode_ko", "region_class",
         "transport_cost_eur_per_kgkm", "cost_source_basis"
     ]].copy()
-    show_explained_dataframe(
-        transport_cost, "운송수단·권역별 비용",
-        "각 행은 운송수단과 적용 권역의 조합입니다.",
-        value_meaning="운송비는 운송량(kg) × 경로거리(km) × €/kg·km로 계산됩니다.",
-    )
 
 def run_app():
     st.set_page_config(page_title="PDF 기반 전기차 공급망 Route LP", page_icon="🚗", layout="wide")
@@ -4650,17 +4603,10 @@ def run_app():
                             show_explained_dataframe(frame, name, "각 행은 해당 인덱스 조합의 양의 최적화 결과입니다.", value_meaning="열 이름과 값은 물량·비용·배출량·국가를 나타냅니다.")
                 with subtabs[5]:
                     st.json({k:selected.get(k) for k in ["status","solver_name","solver_version","solver_iterations","variable_count","constraint_count","matrix_nonzeros","wall_time_sec","applied_policy_score","fleet_total_cap_kgco2","fleet_cap_slack_kgco2","fleet_cap_utilization_pct","fleet_cap_met","all_product_reference_caps_met","objective_reconstruction_gap_eur"]})
-
+    '''
     with tabs[4]:
         render_math_model_tab_v89(tables)
-
-    with tabs[5]:
-        st.header("포스터 기준 결과와 비교")
-        poster_path = ASSET_DIR / "poster_reference.png"
-        if poster_path.exists(): st.image(str(poster_path), caption="2025 춘계산업공학회 포스터 기준 그림", use_container_width=True)
-        show_explained_dataframe(tables["poster_benchmark_cost_ratios.csv"], "포스터 비용 비율", "각 행은 포스터의 한 시나리오입니다.", value_meaning="포스터 기준 모듈/라인 비용비율입니다.")
-        show_explained_dataframe(tables["poster_benchmark_quartiles.csv"], "포스터 사분위수", "각 행은 포스터의 한 시나리오·Q구간입니다.", value_meaning="포스터 기준 운송량 분포입니다.")
-
+    '''
 
 
 if __name__ == "__main__":
