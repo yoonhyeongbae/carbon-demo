@@ -1,22 +1,10 @@
 from __future__ import annotations
 
-"""
-Flexible EV supply-chain LP (v16.0)
+# Flexible EV supply-chain LP (v17.0)
+# The exact uploaded v8.20 objective, variables and constraints are retained.
+# User selections only change the active R/O/A/T index sets.
 
-Key additions
--------------
-1. Dynamic product structure based on item_catalog.csv + product_bom.csv.
-2. Every model-data CSV is supplied by the user; no model dataset is embedded in app.py.
-3. Users define a new raw material/intermediate item in the data tab, upload its BOM/supplier/process CSVs, then activate it by checkbox.
-4. Checkboxes include/exclude raw materials and intermediate goods from the optimization model.
-5. Stage-separated maps: Stage 1 production, Stage 2 inbound/assembly, Stage 3 France market.
 
-Run:
-    streamlit run app.py
-
-Dependencies:
-    streamlit pandas numpy geopy ortools folium streamlit-folium altair
-"""
 
 import gc
 import hashlib
@@ -42,12 +30,12 @@ except Exception:
     st = None
 
 
-APP_BUILD = "reference-v820-dynamic-R-O-A-T-index-v16.0"
-APP_PACKAGE_ID = "20260806-v16.0-reference-v820-dynamic-material-country-transport-index"
-SESSION_TABLES_KEY = "user_tables_v16"
-SESSION_RESULTS_KEY = "optimization_results_v16"
-SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v16"
-SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v16"
+APP_BUILD = "reference-v820-dynamic-R-O-A-T-copper-plastic-v17.0"
+APP_PACKAGE_ID = "20260806-v17.0-reference-v820-copper-plastic-dynamic-index"
+SESSION_TABLES_KEY = "user_tables_v17"
+SESSION_RESULTS_KEY = "optimization_results_v17"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v17"
+SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v17"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -2378,7 +2366,7 @@ def render_item_selection(catalog: pd.DataFrame) -> List[str]:
         item_id = str(row["item_id"])
         mandatory = int(row["mandatory"]) == 1
         default = bool(int(row["default_enabled"])) or mandatory
-        key = f"v16_item_enabled::{item_id}"
+        key = f"v17_item_enabled::{item_id}"
         if key not in st.session_state:
             st.session_state[key] = default
         with cols[idx % len(cols)]:
@@ -2427,10 +2415,6 @@ def render_stage_country_selection(
     active_item_ids: Sequence[str],
 ) -> Dict[str, List[str]]:
     st.markdown("### 선택 원료별 Stage 1·Stage 2 국가 선택")
-    st.info(
-        "2번 탭에서 선택한 각 원료에 대해 Stage 1 생산 가능국가와 Stage 2 중간가공·조립 가능국가를 따로 선택합니다. "
-        "기본값은 데이터에 등록된 24개국 전체 선택입니다. 실제 차량 조립지는 선택 원료들의 Stage 2 국가집합의 교집합에서 결정됩니다."
-    )
     selected: Dict[str, List[str]] = {}
     item_lookup = catalog.set_index("item_id")
     all_plant_order = plants["location_name"].astype(str).tolist()
@@ -2479,11 +2463,6 @@ def render_stage_country_selection(
 
 def render_transport_mode_selection() -> List[str]:
     st.markdown("### 허용 외부 운송수단 선택")
-    st.info(
-        "선택한 운송수단만 Stage 1→2 원료·원자재 운송과 Stage 2→3 완성차 운송의 "
-        "활성 운송 인덱스에 포함됩니다. 국가별 CSV 허용규칙도 동시에 만족해야 합니다. "
-        "같은 국가 안의 내부이동은 기준모형의 t=0 구조를 유지하기 위해 자동 허용됩니다."
-    )
     saved = st.session_state.get(SESSION_SELECTED_TRANSPORT_MODES_KEY, list(ROUTE_MODE_CODES))
     selected: List[str] = []
     cols = st.columns(3)
@@ -2595,19 +2574,13 @@ def comparison_dataframe(results: Mapping[Tuple[str, str], Dict]) -> pd.DataFram
 
 def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
     st.header("사용자 업로드 데이터 기반 전기자동차 공급망 최적화 SaaS")
-    st.info(
-        "본 SaaS의 목적함수는 Stage 1 품목 생산, Stage 2 조립지 유입 운송·차량 조립, "
-        "Stage 3 프랑스 시장 출시 운송의 총비용 최소화입니다. S2·S3에서는 회사 전체 "
-        "탄소발자국 상한이 제약조건으로 적용됩니다."
-    )
-    st.markdown("## 데이터 운영 원칙")
-    st.markdown(
-        "- 최적화 데이터는 `app.py`에 내장되어 있지 않습니다. 2번 탭에서 필수 CSV 12개 또는 ZIP을 업로드해야 합니다.\n"
-        "- 철강·알루미늄·기타 원자재·배터리 등 기존 품목도 업로드 CSV에서 정의됩니다.\n"
-        "- 새 품목은 2번 탭의 품목 정의 폼에 이름과 속성을 입력하고, BOM·생산지·추가 공정 CSV를 업로드하여 추가합니다.\n"
-        "- 데이터가 완성된 새 품목은 3번 탭에 체크박스로 자동 표시됩니다.\n"
-        "- 품목 체크는 제품구조 범위를 정하며, Solver는 체크된 품목의 생산지·조립지·운송수단과 물량을 최적화합니다."
-    )
+    with st.expander("수학적 최적화 모형 구현 확인", expanded=False):
+        st.markdown(
+            "`build_flexible_lp_model()`은 2번 탭의 활성 품목 R, 3번 탭의 Stage 1 국가 O, "
+            "공통 Stage 2 국가 A, 허용 운송수단 T로 `IndexLayout`을 다시 생성합니다. "
+            "목적함수·탄소계수·7개 제약군은 이 활성 인덱스에 대해서만 생성됩니다."
+        )
+
     st.markdown("## Stage 구조")
     stages = pd.DataFrame([
         ["Stage 1 생산지", "투입 원료 → 원자재·중간재 생산", "선택된 각 품목의 생산량·비용·탄소발자국·생산용량"],
@@ -2617,8 +2590,9 @@ def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
     st.dataframe(stages, use_container_width=True, hide_index=True)
     st.markdown("## 제품구조 변경 해석")
     st.warning(
-        "원료를 체크 해제해도 다른 원료가 자동으로 증가하지 않습니다. 희토류를 체크하면 업로드된 희토류 BOM 질량과 "
-        "Stage 1·2 비용·탄소발자국이 추가됩니다. 기능적으로 동등한 제품구조를 비교하려면 BOM 수량을 함께 검토해야 합니다."
+        "원료를 체크 해제해도 다른 원료가 자동으로 증가하지 않습니다. 희토류·구리·플라스틱을 체크하면 해당 BOM 질량과 "
+        "Stage 1 생산·운송, Stage 2 조립 및 Stage 3 완성차 운송 항이 동일한 기준모형 인덱스에 추가됩니다. "
+        "기능적으로 동등한 제품구조를 비교하려면 기타 원자재와 추가 품목의 BOM 질량을 함께 조정해야 합니다."
     )
     if tables:
         status = item_data_status(tables)
@@ -2629,18 +2603,14 @@ def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
 
 def render_input_tab(tables: Mapping[str, pd.DataFrame]):
     st.header("사용자 CSV 데이터 및 제품구조 원료 선택")
-    st.info(
-        "사용자가 철강·알루미늄·기타 원자재·배터리·희토류의 BOM과 Stage 1 생산계수를 입력하고, "
-        "첨부 v8.20 기준모형의 국가별 비배터리 조립계수와 배터리팩·모듈 제조·조립계수를 사용하는 구조입니다."
-    )
 
     st.markdown("## 2.1 필수 CSV 또는 ZIP 업로드")
     uploads = st.file_uploader(
         "필수 데이터 파일", type=["csv", "zip"], accept_multiple_files=True,
-        key="v16_full_data_uploads",
-        help="필수 CSV 12개 또는 base_csv_upload_v16.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
+        key="v17_full_data_uploads",
+        help="필수 CSV 12개 또는 base_csv_upload_v17.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
     )
-    if st.button("업로드 데이터 적용", type="primary", key="v16_apply_full_data"):
+    if st.button("업로드 데이터 적용", type="primary", key="v17_apply_full_data"):
         parsed, messages = parse_full_data_uploads(uploads)
         for message in messages:
             st.caption(message)
@@ -2659,11 +2629,11 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         with c1:
             st.download_button(
                 "현재 세션 CSV ZIP 다운로드", data=make_tables_zip(tables),
-                file_name="current_ev_supply_chain_data_v16.zip", mime="application/zip",
+                file_name="current_ev_supply_chain_data_v17.zip", mime="application/zip",
                 use_container_width=True,
             )
         with c2:
-            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v16_reset_all"):
+            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v17_reset_all"):
                 st.session_state.pop(SESSION_TABLES_KEY, None)
                 st.session_state.pop(SESSION_RESULTS_KEY, None)
                 st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
@@ -2679,7 +2649,7 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         for error in errors:
             st.write(f"- {error}")
         return
-    st.success("철강·알루미늄·기타 원자재·배터리·희토류의 Stage 1·2 데이터 검증을 통과했습니다.")
+    st.success("활성화 가능한 전체 품목의 BOM·Stage 1·Stage 2 데이터 검증을 통과했습니다.")
 
     active_item_ids = render_item_selection(tables["item_catalog.csv"].sort_values("item_index"))
 
@@ -2770,7 +2740,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 조회 조합",
         available,
         format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-        key="stage_map_result_choice_v16",
+        key="stage_map_result_choice_v17",
     )
     map_options = [
         "전체 공급망 전과정: Stage 1→2→3",
@@ -2784,7 +2754,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 단계",
         map_options,
         horizontal=False,
-        key="stage_map_stage_choice_v16",
+        key="stage_map_stage_choice_v17",
     )
     view_code = {
         map_options[0]: 0,
@@ -2812,7 +2782,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             options=list(selected.get("active_item_ids", [])),
             default=list(selected.get("active_item_ids", [])),
             format_func=lambda item_id: str(catalog_map.loc[item_id, "item_name_ko"]) if item_id in catalog_map.index else str(item_id),
-            key=f"map_items_v16_{chosen[0]}_{chosen[1]}_{view_code}",
+            key=f"map_items_v17_{chosen[0]}_{chosen[1]}_{view_code}",
             help="경로가 겹칠 때 특정 원료만 선택하면 해당 공급경로를 분리해서 확인할 수 있습니다.",
         )
         if not visible_item_ids:
@@ -2820,7 +2790,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             return
     render_stage_map(
         selected, view_code,
-        key=f"stage_map_v16_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
+        key=f"stage_map_v17_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
         visible_item_ids=visible_item_ids,
     )
 
@@ -2972,10 +2942,6 @@ def render_analysis_tab(results: Mapping[Tuple[str, str], Dict]):
 def run_app():
     st.set_page_config(page_title="사용자 데이터 기반 EV 공급망 LP", page_icon="🚗", layout="wide")
     st.title("프랑스 전기차 보조금 탄소발자국 상한 대응 공급망 비용 최적화")
-    st.caption(
-        f"build: {APP_BUILD} · 첨부 v8.20 목적함수·제약조건 고정 · 동적 R/O/A/T 인덱스 · "
-        "원료·Stage 1/2 국가·운송수단 선택 · 6개 지도 보기 · 원료별 분리 경로 · 안전 차트"
-    )
 
     tables: Dict[str, pd.DataFrame] = {
         name: frame.copy() for name, frame in st.session_state.get(SESSION_TABLES_KEY, {}).items()
@@ -2996,7 +2962,7 @@ def run_app():
                 st.caption("2번 탭 선택 원료: " + ", ".join(active))
         else:
             st.info("2번 탭에서 CSV 또는 ZIP을 업로드하세요.")
-        if st.button("최적화 결과만 초기화", use_container_width=True, key="v16_reset_results"):
+        if st.button("최적화 결과만 초기화", use_container_width=True, key="v17_reset_results"):
             st.session_state.pop(SESSION_RESULTS_KEY, None)
             gc.collect()
             st.success("결과를 초기화했습니다.")
@@ -3035,7 +3001,7 @@ def run_app():
                 st.success("2번 탭에서 선택된 원료: " + ", ".join(names))
 
                 preview = product_structure_preview(tables, active_item_ids)
-                show_dataframe(preview, "선택 제품구조 미리보기", "희토류가 해제된 기본구조는 철강·알루미늄·기타 원자재·배터리입니다.")
+                show_dataframe(preview, "선택 제품구조 미리보기", "기본구조는 철강·알루미늄·기타 원자재·배터리이며 희토류·구리·플라스틱은 선택사항입니다.")
 
                 selected_country_map = render_stage_country_selection(
                     tables["item_catalog.csv"], tables["item_suppliers.csv"],
