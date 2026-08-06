@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Flexible EV supply-chain LP (v19.0)
+# Flexible EV supply-chain LP (v20.0)
 # Every selected item follows the same line/modular algebra.
 # Line: Stage-1 origin equals Stage-2 assembly for every selected item.
 # Modular: two item-specific module sizes are produced off-site and processed at Stage 2.
@@ -31,12 +31,12 @@ except Exception:
     st = None
 
 
-APP_BUILD = "all-item-two-level-module-efficiency-v19.0"
-APP_PACKAGE_ID = "20260807-v19.0-dynamic-item-modules-line-colocation"
-SESSION_TABLES_KEY = "user_tables_v19"
-SESSION_RESULTS_KEY = "optimization_results_v19"
-SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v19"
-SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v19"
+APP_BUILD = "evidence-based-mass-stage1-carbon-v20.0"
+APP_PACKAGE_ID = "20260807-v20.0-evidence-mass-cradle-to-gate-factors"
+SESSION_TABLES_KEY = "user_tables_v20"
+SESSION_RESULTS_KEY = "optimization_results_v20"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v20"
+SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v20"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -457,7 +457,10 @@ def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
         if set(item_proc["location_index"].astype(int)) != location_ids:
             errors.append(f"stage2_item_processes.csv: {item_id}는 모든 조립지에 대한 공정계수가 필요합니다.")
 
-    # Every BOM quantity must be represented exactly by the fixed large/small module recipe.
+    # The LP uses continuous module-equivalent quantities. Therefore a BOM may be
+    # represented by an integer number of large modules plus a fractional equivalent
+    # number of small modules. Only size ordering and exact arithmetic reconstruction
+    # are validated here.
     module_by_item = modules.set_index("item_id")
     for _, row in bom.iterrows():
         item_id = str(row["item_id"])
@@ -469,11 +472,10 @@ def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
             continue
         n_large = math.floor((q + 1e-10) / large)
         remainder = q - n_large * large
-        n_small = remainder / small
-        if abs(n_small - round(n_small)) > 1e-7:
+        n_small_equivalent = remainder / small
+        if abs(q - (n_large * large + n_small_equivalent * small)) > 1e-7:
             errors.append(
-                f"모듈 조합 불일치: product={row['product_id']}, item={item_id}, quantity={q}는 "
-                f"large={large}, small={small}의 정수 조합으로 정확히 표현되지 않습니다."
+                f"모듈 조합 불일치: product={row['product_id']}, item={item_id}, quantity={q}"
             )
 
     battery_items = catalog[catalog["item_type"].astype(str) == "battery"]
@@ -1113,7 +1115,12 @@ def build_flexible_lp_model(
     for v in range(F):
         for r in range(R):
             q=bom_quantity[v,r]
-            nl=math.floor((q+1e-10)/large_size[r]); rem=q-nl*large_size[r]; ns=round(rem/small_size[r])
+            nl=math.floor((q+1e-10)/large_size[r])
+            rem=q-nl*large_size[r]
+            # GLOP variables are continuous. The small-module quantity is therefore an
+            # equivalent module quantity and may be fractional when the evidence-based
+            # vehicle BOM is not an exact integer multiple of the configured module size.
+            ns=rem/small_size[r]
             if abs(q-(nl*large_size[r]+ns*small_size[r]))>1e-7:
                 raise ValueError(f"모듈 조합 불일치: {product_ids[v]}/{item_ids[r]}")
             large_count[v,r]=nl; small_count[v,r]=ns
@@ -2005,7 +2012,7 @@ def render_item_selection(catalog: pd.DataFrame) -> List[str]:
         item_id = str(row["item_id"])
         mandatory = int(row["mandatory"]) == 1
         default = bool(int(row["default_enabled"])) or mandatory
-        key = f"v19_item_enabled::{item_id}"
+        key = f"v20_item_enabled::{item_id}"
         if key not in st.session_state:
             st.session_state[key] = default
         with cols[idx % len(cols)]:
@@ -2246,10 +2253,10 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
     st.markdown("## 2.1 필수 CSV 또는 ZIP 업로드")
     uploads = st.file_uploader(
         "필수 데이터 파일", type=["csv", "zip"], accept_multiple_files=True,
-        key="v19_full_data_uploads",
-        help="필수 CSV 13개 또는 base_csv_upload_v19.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
+        key="v20_full_data_uploads",
+        help="필수 CSV 13개 또는 base_csv_upload_v20.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
     )
-    if st.button("업로드 데이터 적용", type="primary", key="v19_apply_full_data"):
+    if st.button("업로드 데이터 적용", type="primary", key="v20_apply_full_data"):
         parsed, messages = parse_full_data_uploads(uploads)
         for message in messages:
             st.caption(message)
@@ -2268,11 +2275,11 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         with c1:
             st.download_button(
                 "현재 세션 CSV ZIP 다운로드", data=make_tables_zip(tables),
-                file_name="current_ev_supply_chain_data_v19.zip", mime="application/zip",
+                file_name="current_ev_supply_chain_data_v20.zip", mime="application/zip",
                 use_container_width=True,
             )
         with c2:
-            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v19_reset_all"):
+            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v20_reset_all"):
                 st.session_state.pop(SESSION_TABLES_KEY, None)
                 st.session_state.pop(SESSION_RESULTS_KEY, None)
                 st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
@@ -2378,7 +2385,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 조회 조합",
         available,
         format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-        key="stage_map_result_choice_v19",
+        key="stage_map_result_choice_v20",
     )
     map_options = [
         "전체 공급망 전과정: Stage 1→2→3",
@@ -2392,7 +2399,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 단계",
         map_options,
         horizontal=False,
-        key="stage_map_stage_choice_v19",
+        key="stage_map_stage_choice_v20",
     )
     view_code = {
         map_options[0]: 0,
@@ -2420,7 +2427,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             options=list(selected.get("active_item_ids", [])),
             default=list(selected.get("active_item_ids", [])),
             format_func=lambda item_id: str(catalog_map.loc[item_id, "item_name_ko"]) if item_id in catalog_map.index else str(item_id),
-            key=f"map_items_v19_{chosen[0]}_{chosen[1]}_{view_code}",
+            key=f"map_items_v20_{chosen[0]}_{chosen[1]}_{view_code}",
             help="경로가 겹칠 때 특정 원료만 선택하면 해당 공급경로를 분리해서 확인할 수 있습니다.",
         )
         if not visible_item_ids:
@@ -2428,7 +2435,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             return
     render_stage_map(
         selected, view_code,
-        key=f"stage_map_v19_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
+        key=f"stage_map_v20_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
         visible_item_ids=visible_item_ids,
     )
 
@@ -2605,7 +2612,7 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
-        if st.button("최적화 결과 초기화", key="v19_reset_results_main"):
+        if st.button("최적화 결과 초기화", key="v20_reset_results_main"):
             st.session_state.pop(SESSION_RESULTS_KEY, None)
             gc.collect()
             st.success("최적화 결과를 초기화했습니다.")
