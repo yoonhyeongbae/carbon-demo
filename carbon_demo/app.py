@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Flexible EV supply-chain LP (v10.0)
+Flexible EV supply-chain LP (v11.0)
 
 Key additions
 -------------
@@ -42,10 +42,11 @@ except Exception:
     st = None
 
 
-APP_BUILD = "external-csv-flexible-product-structure-stage-maps-v10.0"
-APP_PACKAGE_ID = "20260806-v10.0-external-csv-custom-items-stage-maps"
-SESSION_TABLES_KEY = "user_tables_v10"
-SESSION_RESULTS_KEY = "optimization_results_v10"
+APP_BUILD = "external-csv-fixed-five-material-selection-stage-country-v11.0"
+APP_PACKAGE_ID = "20260806-v11.0-five-material-stage1-stage2-country-selection"
+SESSION_TABLES_KEY = "user_tables_v11"
+SESSION_RESULTS_KEY = "optimization_results_v11"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v11"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -200,6 +201,10 @@ def _upsert_frame(base: pd.DataFrame, incoming: pd.DataFrame, keys: Sequence[str
 def _save_tables_to_session(tables: Mapping[str, pd.DataFrame]) -> None:
     st.session_state[SESSION_TABLES_KEY] = {name: frame.copy() for name, frame in tables.items()}
     st.session_state.pop(SESSION_RESULTS_KEY, None)
+    st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(("v11_item_enabled::", "country::stage1::", "country::stage2::")):
+            st.session_state.pop(key, None)
 
 
 def _normalized_item_id(value: str) -> str:
@@ -892,30 +897,57 @@ def _normalize_active_items(catalog: pd.DataFrame, active_item_ids: Optional[Seq
 def _normalize_country_map(
     active_items: Sequence[str],
     suppliers: pd.DataFrame,
+    processes: pd.DataFrame,
     plants: pd.DataFrame,
     selected_country_map: Optional[Mapping[str, Sequence[str]]],
 ) -> Dict[str, Tuple[str, ...]]:
+    """Normalize item-specific Stage 1 and Stage 2 country selections.
+
+    Keys are ``stage1::<item_id>`` and ``stage2::<item_id>``. The common vehicle
+    assembly set is the intersection of all selected items' Stage 2 sets and is
+    stored under ``assembly``.
+    """
     all_plants = tuple(plants["location_name"].astype(str).tolist())
     result: Dict[str, Tuple[str, ...]] = {}
+    common_stage2 = set(all_plants)
     for item_id in active_items:
-        available = tuple(
+        stage1_available = tuple(
             suppliers.loc[
                 (suppliers["item_id"].astype(str) == item_id)
                 & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
                 "location_name",
             ].astype(str).tolist()
         )
-        requested = None if selected_country_map is None else selected_country_map.get(item_id)
-        chosen = tuple(name for name in available if requested is None or name in {str(v) for v in requested})
-        if not chosen:
-            raise ValueError(f"{item_id}: 허용 생산지를 최소 1개 선택해야 합니다.")
-        result[item_id] = chosen
-    requested_assembly = None if selected_country_map is None else selected_country_map.get("assembly")
-    result["assembly"] = tuple(
-        name for name in all_plants if requested_assembly is None or name in {str(v) for v in requested_assembly}
-    )
+        stage2_available = tuple(
+            processes.loc[
+                (processes["item_id"].astype(str) == item_id)
+                & (pd.to_numeric(processes["active_default"], errors="coerce").fillna(0).astype(int) == 1),
+                "location_name",
+            ].astype(str).tolist()
+        )
+        if not stage1_available:
+            raise ValueError(f"{item_id}: Stage 1 생산지 데이터가 없습니다.")
+        if not stage2_available:
+            raise ValueError(f"{item_id}: Stage 2 공정국가 데이터가 없습니다.")
+
+        req1 = None if selected_country_map is None else selected_country_map.get(f"stage1::{item_id}")
+        req2 = None if selected_country_map is None else selected_country_map.get(f"stage2::{item_id}")
+        chosen1 = tuple(name for name in stage1_available if req1 is None or name in {str(v) for v in req1})
+        chosen2 = tuple(name for name in stage2_available if req2 is None or name in {str(v) for v in req2})
+        if not chosen1:
+            raise ValueError(f"{item_id}: Stage 1 생산지를 최소 1개 선택해야 합니다.")
+        if not chosen2:
+            raise ValueError(f"{item_id}: Stage 2 조립지를 최소 1개 선택해야 합니다.")
+        result[f"stage1::{item_id}"] = chosen1
+        result[f"stage2::{item_id}"] = chosen2
+        common_stage2 &= set(chosen2)
+
+    result["assembly"] = tuple(name for name in all_plants if name in common_stage2)
     if not result["assembly"]:
-        raise ValueError("조립지를 최소 1개 선택해야 합니다.")
+        raise ValueError(
+            "선택된 모든 원료의 Stage 2 국가에 공통으로 포함되는 차량 조립지가 없습니다. "
+            "각 원료의 Stage 2 국가선택에서 최소 1개의 공통 국가를 남기세요."
+        )
     return result
 
 
@@ -954,7 +986,7 @@ def build_flexible_lp_model(
     bom = bom_all[bom_all["item_id"].astype(str).isin(active_items)].copy()
     suppliers = suppliers_all[suppliers_all["item_id"].astype(str).isin(active_items)].copy()
     processes = processes_all[processes_all["item_id"].astype(str).isin(active_items)].copy()
-    selected_map = _normalize_country_map(active_items, suppliers, plants, selected_country_map)
+    selected_map = _normalize_country_map(active_items, suppliers, processes, plants, selected_country_map)
 
     F, R, O, A, T = len(products), len(items), len(plants), len(plants), len(ROUTE_MODE_CODES)
     layout = IndexLayout(production_mode, F, R, O, A, T)
@@ -979,31 +1011,29 @@ def build_flexible_lp_model(
     supplier_cost = np.zeros((R, O), dtype=float)
     supplier_ef = np.zeros((R, O), dtype=float)
     supplier_capacity = np.zeros((R, O), dtype=float)
-    active_supplier = np.zeros((R, O), dtype=bool)
-    location_names = plants["location_name"].astype(str).tolist()
-    for r, item_id in enumerate(item_ids):
-        chosen = set(selected_map[item_id])
-        for o, location_name in enumerate(location_names):
-            row = suppliers[(suppliers["item_id"].astype(str) == item_id) & (suppliers["location_index"].astype(int) == o + 1)]
-            if row.empty:
-                continue
-            supplier_cost[r, o] = float(row.iloc[0]["stage1_cost_per_unit"])
-            supplier_ef[r, o] = float(row.iloc[0]["stage1_ef_kgco2_per_unit"])
-            supplier_capacity[r, o] = float(row.iloc[0]["capacity"])
-            active_supplier[r, o] = location_name in chosen
-
+    active_stage1 = np.zeros((R, O), dtype=bool)
     process_cost = np.zeros((R, A), dtype=float)
     process_ef = np.zeros((R, A), dtype=float)
-    for r, item in items.iterrows():
-        if int(item["has_stage2_process"]) != 1:
-            continue
-        item_id = str(item["item_id"])
-        for a in range(A):
+    active_stage2 = np.zeros((R, A), dtype=bool)
+    location_names = plants["location_name"].astype(str).tolist()
+
+    for r, item_id in enumerate(item_ids):
+        chosen_stage1 = set(selected_map[f"stage1::{item_id}"])
+        chosen_stage2 = set(selected_map[f"stage2::{item_id}"])
+        for o, location_name in enumerate(location_names):
+            row = suppliers[(suppliers["item_id"].astype(str) == item_id) & (suppliers["location_index"].astype(int) == o + 1)]
+            if not row.empty:
+                supplier_cost[r, o] = float(row.iloc[0]["stage1_cost_per_unit"])
+                supplier_ef[r, o] = float(row.iloc[0]["stage1_ef_kgco2_per_unit"])
+                supplier_capacity[r, o] = float(row.iloc[0]["capacity"])
+                active_stage1[r, o] = location_name in chosen_stage1
+        for a, location_name in enumerate(location_names):
             row = processes[(processes["item_id"].astype(str) == item_id) & (processes["location_index"].astype(int) == a + 1)]
             if row.empty:
                 raise ValueError(f"stage2_item_processes.csv: {item_id}, location_index={a+1} 누락")
             process_cost[r, a] = float(row.iloc[0]["process_cost_per_unit"])
             process_ef[r, a] = float(row.iloc[0]["process_ef_kgco2_per_unit"])
+            active_stage2[r, a] = location_name in chosen_stage2
 
     active_assembly = np.asarray([name in set(selected_map["assembly"]) for name in location_names], dtype=bool)
     market = markets.iloc[0]
@@ -1045,12 +1075,12 @@ def build_flexible_lp_model(
                 idx = layout.p(v, r, o)
                 c[idx] = supplier_cost[r, o] * gross_multiplier
                 emission_p[idx - layout.off_p] = supplier_ef[r, o] * gross_multiplier
-                if not active_supplier[r, o]:
+                if not active_stage1[r, o]:
                     ub[idx] = 0.0
                 for a in range(A):
                     for t in range(T):
                         tidx = layout.tin(v, r, o, a, t)
-                        if not active_supplier[r, o] or not active_assembly[a]:
+                        if not active_stage1[r, o] or not active_stage2[r, a]:
                             ub[tidx] = 0.0
                             continue
                         is_battery = r == battery_r
@@ -1079,25 +1109,20 @@ def build_flexible_lp_model(
             aidx = layout.assembly(v, a)
             if not active_assembly[a]:
                 ub[aidx] = 0.0
-            generic_cost = nonbattery_mass[v] * float(plants.iloc[a]["assembly_cost_eur_per_kg"])
-            generic_ef = nonbattery_mass[v] * float(plants.iloc[a]["assembly_ef_kgco2_per_kg"])
-            extra_cost = float(np.dot(bom_quantity[v, :], process_cost[:, a]))
-            extra_ef = float(np.dot(bom_quantity[v, :], process_ef[:, a]))
-            c[aidx] = generic_cost + extra_cost
-            emission_a[aidx - layout.off_a] = generic_ef + extra_ef
+            stage2_cost = float(np.dot(bom_quantity[v, :], process_cost[:, a]))
+            stage2_ef = float(np.dot(bom_quantity[v, :], process_ef[:, a]))
+            c[aidx] = stage2_cost
+            emission_a[aidx - layout.off_a] = stage2_ef
             for t in range(T):
                 fidx = layout.tmarket(v, a, t)
                 if not active_assembly[a] or not route["final_allowed"][a, t]:
                     ub[fidx] = 0.0
                     continue
                 c[fidx] = selected_vehicle_mass[v] * route["final_cost_per_kg"][a, t]
-                emission_tmarket[fidx - layout.off_tmarket] = (
-                    selected_vehicle_mass[v] * route["final_ef_per_kg"][a, t]
-                )
+                emission_tmarket[fidx - layout.off_tmarket] = selected_vehicle_mass[v] * route["final_ef_per_kg"][a, t]
 
     rows = LinearConstraintBuilder(layout.n_vars)
 
-    # Demand and vehicle-flow balance.
     for v in range(F):
         cols = [layout.tmarket(v, a, t) for a in range(A) for t in range(T)]
         rows.add_eq(cols, [1.0] * len(cols), demand_values[v])
@@ -1105,7 +1130,6 @@ def build_flexible_lp_model(
             cols = [layout.assembly(v, a)] + [layout.tmarket(v, a, t) for t in range(T)]
             rows.add_eq(cols, [1.0] + [-1.0] * T, 0.0)
 
-    # Item requirements at each assembly location.
     for v in range(F):
         for r in range(R):
             requirement = bom_quantity[v, r]
@@ -1115,23 +1139,16 @@ def build_flexible_lp_model(
                 vals = [1.0] * (O * T) + [-requirement]
                 rows.add_eq(cols, vals, 0.0)
 
-    # Production equals all outbound item flow.
     for v in range(F):
         for r in range(R):
             for o in range(O):
                 cols = [layout.p(v, r, o)] + [layout.tin(v, r, o, a, t) for a in range(A) for t in range(T)]
                 rows.add_eq(cols, [1.0] + [-1.0] * (A * T), 0.0)
 
-    # Supplier capacity.
     for r in range(R):
         for o in range(O):
-            rows.add_le(
-                [layout.p(v, r, o) for v in range(F)],
-                [1.0] * F,
-                supplier_capacity[r, o],
-            )
+            rows.add_le([layout.p(v, r, o) for v in range(F)], [1.0] * F, supplier_capacity[r, o])
 
-    # Modular 10/5-kWh composition. It is a continuous aggregate model.
     if production_mode == "modular":
         for v in range(F):
             for o in range(O):
@@ -1141,7 +1158,6 @@ def build_flexible_lp_model(
                     vals = [1.0] * T + [-10.0, -5.0]
                     rows.add_eq(cols, vals, 0.0)
 
-    # Company-wide fleet carbon-footprint cap.
     if int(scenario.get("apply_carbon_cap", 0)) == 1:
         cols: List[int] = []
         vals: List[float] = []
@@ -1161,43 +1177,20 @@ def build_flexible_lp_model(
 
     signature = _structure_signature(active_items, selected_map)
     return FlexibleLPModel(
-        layout=layout,
-        c=c,
-        lb=lb,
-        ub=ub,
-        rows=rows,
-        products=products,
-        items=items,
-        bom=bom,
-        suppliers=suppliers,
-        processes=processes,
-        plants=plants,
-        market=market,
-        scenario=scenario,
-        demand_values=demand_values,
-        item_ids=item_ids,
-        item_index=item_index,
-        battery_r=battery_r,
-        bom_quantity=bom_quantity,
-        mass_per_unit=mass_per_unit,
-        selected_vehicle_mass=selected_vehicle_mass,
-        nonbattery_mass=nonbattery_mass,
-        supplier_cost=supplier_cost,
-        supplier_ef=supplier_ef,
-        supplier_capacity=supplier_capacity,
-        process_cost=process_cost,
-        process_ef=process_ef,
-        route=route,
-        emission_p=emission_p,
-        emission_tin=emission_tin,
-        emission_a=emission_a,
+        layout=layout, c=c, lb=lb, ub=ub, rows=rows, products=products, items=items,
+        bom=bom, suppliers=suppliers, processes=processes, plants=plants, market=market,
+        scenario=scenario, demand_values=demand_values, item_ids=item_ids, item_index=item_index,
+        battery_r=battery_r, bom_quantity=bom_quantity, mass_per_unit=mass_per_unit,
+        selected_vehicle_mass=selected_vehicle_mass, nonbattery_mass=nonbattery_mass,
+        supplier_cost=supplier_cost, supplier_ef=supplier_ef, supplier_capacity=supplier_capacity,
+        process_cost=process_cost, process_ef=process_ef, route=route,
+        emission_p=emission_p, emission_tin=emission_tin, emission_a=emission_a,
         emission_tmarket=emission_tmarket,
         selected_country_map={k: tuple(v) for k, v in selected_map.items()},
-        structure_signature=signature,
-        equality_count=rows.equality_count,
-        inequality_count=rows.inequality_count,
-        matrix_nonzeros=rows.nonzero_count,
+        structure_signature=signature, equality_count=rows.equality_count,
+        inequality_count=rows.inequality_count, matrix_nonzeros=rows.nonzero_count,
     )
+
 
 
 def _create_solver() -> Tuple[pywraplp.Solver, str]:
@@ -1328,11 +1321,11 @@ def extract_solution(result: SolveResult) -> Dict:
     production_rows: List[Dict] = []
     inbound_rows: List[Dict] = []
     assembly_rows: List[Dict] = []
+    stage2_item_rows: List[Dict] = []
     market_rows: List[Dict] = []
     module_rows: List[Dict] = []
 
     item_meta = model.items.set_index("item_id")
-    product_ids = model.products["product_id"].astype(str).tolist()
     location_names = model.plants["location_name"].astype(str).tolist()
 
     for v, product in model.products.iterrows():
@@ -1344,14 +1337,10 @@ def extract_solution(result: SolveResult) -> Dict:
                 amount = float(x[L.p(v, r, o)])
                 if _positive(amount):
                     production_rows.append({
-                        "product_id": pid,
-                        "product_name_ko": product["product_name_ko"],
-                        "item_id": item_id,
-                        "item_name_ko": item["item_name_ko"],
-                        "item_type": item["item_type"],
-                        "origin_index": o + 1,
-                        "origin_location": location_names[o],
-                        "net_output_amount": amount,
+                        "product_id": pid, "product_name_ko": product["product_name_ko"],
+                        "item_id": item_id, "item_name_ko": item["item_name_ko"],
+                        "item_type": item["item_type"], "origin_index": o + 1,
+                        "origin_location": location_names[o], "net_output_amount": amount,
                         "gross_input_amount_after_loss": amount * gross_multiplier,
                         "flow_unit": item["flow_unit"],
                         "stage1_cost_eur": amount * model.supplier_cost[r, o] * gross_multiplier,
@@ -1365,20 +1354,14 @@ def extract_solution(result: SolveResult) -> Dict:
                             continue
                         mass = flow * model.mass_per_unit[v, r]
                         inbound_rows.append({
-                            "product_id": pid,
-                            "product_name_ko": product["product_name_ko"],
-                            "item_id": item_id,
-                            "item_name_ko": item["item_name_ko"],
-                            "item_type": item["item_type"],
-                            "origin_index": o + 1,
-                            "origin_location": location_names[o],
-                            "assembly_index": a + 1,
-                            "assembly_location": location_names[a],
-                            "transport_mode_index": t + 1,
+                            "product_id": pid, "product_name_ko": product["product_name_ko"],
+                            "item_id": item_id, "item_name_ko": item["item_name_ko"],
+                            "item_type": item["item_type"], "origin_index": o + 1,
+                            "origin_location": location_names[o], "assembly_index": a + 1,
+                            "assembly_location": location_names[a], "transport_mode_index": t + 1,
                             "transport_mode": ROUTE_MODE_CODES[t],
                             "transport_mode_ko": ROUTE_MODE_LABEL[ROUTE_MODE_CODES[t]],
-                            "flow_amount": flow,
-                            "flow_unit": item["flow_unit"],
+                            "flow_amount": flow, "flow_unit": item["flow_unit"],
                             "transport_mass_kg": mass,
                             "distance_km": float(model.route["raw_total_km"][o, a, t]),
                             "transport_cost_eur": flow * model.c[L.tin(v, r, o, a, t)],
@@ -1389,38 +1372,41 @@ def extract_solution(result: SolveResult) -> Dict:
         for a in range(L.A):
             vehicles = float(x[L.assembly(v, a)])
             if _positive(vehicles):
-                generic_cost_per_vehicle = model.nonbattery_mass[v] * float(model.plants.iloc[a]["assembly_cost_eur_per_kg"])
-                generic_ef_per_vehicle = model.nonbattery_mass[v] * float(model.plants.iloc[a]["assembly_ef_kgco2_per_kg"])
-                extra_cost_per_vehicle = float(np.dot(model.bom_quantity[v, :], model.process_cost[:, a]))
-                extra_ef_per_vehicle = float(np.dot(model.bom_quantity[v, :], model.process_ef[:, a]))
+                stage2_cost_per_vehicle = float(np.dot(model.bom_quantity[v, :], model.process_cost[:, a]))
+                stage2_ef_per_vehicle = float(np.dot(model.bom_quantity[v, :], model.process_ef[:, a]))
                 assembly_rows.append({
-                    "product_id": pid,
-                    "product_name_ko": product["product_name_ko"],
-                    "assembly_index": a + 1,
-                    "assembly_location": location_names[a],
+                    "product_id": pid, "product_name_ko": product["product_name_ko"],
+                    "assembly_index": a + 1, "assembly_location": location_names[a],
                     "vehicle_equivalents": vehicles,
                     "selected_nonbattery_mass_kg_per_vehicle": model.nonbattery_mass[v],
                     "selected_vehicle_mass_kg": model.selected_vehicle_mass[v],
-                    "body_assembly_cost_eur": vehicles * generic_cost_per_vehicle,
-                    "body_assembly_emissions_kgco2": vehicles * generic_ef_per_vehicle,
-                    "additional_item_process_cost_eur": vehicles * extra_cost_per_vehicle,
-                    "additional_item_process_emissions_kgco2": vehicles * extra_ef_per_vehicle,
-                    "total_stage2_cost_eur": vehicles * (generic_cost_per_vehicle + extra_cost_per_vehicle),
-                    "total_stage2_emissions_kgco2": vehicles * (generic_ef_per_vehicle + extra_ef_per_vehicle),
+                    "total_stage2_cost_eur": vehicles * stage2_cost_per_vehicle,
+                    "total_stage2_emissions_kgco2": vehicles * stage2_ef_per_vehicle,
                 })
+                for r, item_id in enumerate(model.item_ids):
+                    item = item_meta.loc[item_id]
+                    qty_per_vehicle = float(model.bom_quantity[v, r])
+                    stage2_item_rows.append({
+                        "product_id": pid, "product_name_ko": product["product_name_ko"],
+                        "item_id": item_id, "item_name_ko": item["item_name_ko"],
+                        "assembly_index": a + 1, "assembly_location": location_names[a],
+                        "vehicle_equivalents": vehicles,
+                        "quantity_per_vehicle": qty_per_vehicle,
+                        "flow_unit": item["flow_unit"],
+                        "stage2_processed_amount": vehicles * qty_per_vehicle,
+                        "stage2_process": item["stage2_process_name_ko"],
+                        "stage2_cost_eur": vehicles * qty_per_vehicle * model.process_cost[r, a],
+                        "stage2_emissions_kgco2": vehicles * qty_per_vehicle * model.process_ef[r, a],
+                    })
             for t in range(L.T):
                 vehicles_out = float(x[L.tmarket(v, a, t)])
                 if not _positive(vehicles_out):
                     continue
                 market_rows.append({
-                    "product_id": pid,
-                    "product_name_ko": product["product_name_ko"],
-                    "assembly_index": a + 1,
-                    "assembly_location": location_names[a],
-                    "market_id": model.market["market_id"],
-                    "market_name": model.market["market_name"],
-                    "transport_mode_index": t + 1,
-                    "transport_mode": ROUTE_MODE_CODES[t],
+                    "product_id": pid, "product_name_ko": product["product_name_ko"],
+                    "assembly_index": a + 1, "assembly_location": location_names[a],
+                    "market_id": model.market["market_id"], "market_name": model.market["market_name"],
+                    "transport_mode_index": t + 1, "transport_mode": ROUTE_MODE_CODES[t],
                     "transport_mode_ko": ROUTE_MODE_LABEL[ROUTE_MODE_CODES[t]],
                     "vehicle_equivalents": vehicles_out,
                     "selected_vehicle_mass_kg": model.selected_vehicle_mass[v],
@@ -1438,58 +1424,30 @@ def extract_solution(result: SolveResult) -> Dict:
                     n5 = float(x[L.m5(v, o, a)])
                     if _positive(n10) or _positive(n5):
                         module_rows.append({
-                            "product_id": product["product_id"],
-                            "product_name_ko": product["product_name_ko"],
-                            "item_id": battery_id,
-                            "origin_location": location_names[o],
-                            "assembly_location": location_names[a],
-                            "module_10kwh_count": n10,
-                            "module_5kwh_count": n5,
-                            "total_capacity_kwh": 10.0 * n10 + 5.0 * n5,
+                            "product_id": product["product_id"], "product_name_ko": product["product_name_ko"],
+                            "item_id": battery_id, "origin_location": location_names[o],
+                            "assembly_location": location_names[a], "module_10kwh_count": n10,
+                            "module_5kwh_count": n5, "total_capacity_kwh": 10.0 * n10 + 5.0 * n5,
                         })
 
     production_df = pd.DataFrame(production_rows)
     inbound_df = pd.DataFrame(inbound_rows)
     assembly_df = pd.DataFrame(assembly_rows)
+    stage2_item_df = pd.DataFrame(stage2_item_rows)
     market_df = pd.DataFrame(market_rows)
     module_df = pd.DataFrame(module_rows)
 
-    if production_df.empty:
-        battery_production_cost = battery_production_em = 0.0
-        nonbattery_production_cost = nonbattery_production_em = 0.0
-    else:
-        battery_mask = production_df["item_type"].astype(str).eq("battery")
-        battery_production_cost = float(production_df.loc[battery_mask, "stage1_cost_eur"].sum())
-        battery_production_em = float(production_df.loc[battery_mask, "stage1_emissions_kgco2"].sum())
-        nonbattery_production_cost = float(production_df.loc[~battery_mask, "stage1_cost_eur"].sum())
-        nonbattery_production_em = float(production_df.loc[~battery_mask, "stage1_emissions_kgco2"].sum())
-
-    # Stage classification follows the user-facing framework. In line mode, completed-pack
-    # production is co-located with vehicle assembly and therefore shown in Stage 2. In modular
-    # mode, module production occurs at Stage 1 and the separate module-to-pack coefficient at
-    # Stage 2 remains zero unless the user supplies a custom process item.
-    if model.layout.mode == "line":
-        stage1_cost = nonbattery_production_cost
-        stage1_em = nonbattery_production_em
-        stage2_battery_cost = battery_production_cost
-        stage2_battery_em = battery_production_em
-    else:
-        stage1_cost = nonbattery_production_cost + battery_production_cost
-        stage1_em = nonbattery_production_em + battery_production_em
-        stage2_battery_cost = 0.0
-        stage2_battery_em = 0.0
-
+    stage1_cost = float(production_df.get("stage1_cost_eur", pd.Series(dtype=float)).sum())
+    stage1_em = float(production_df.get("stage1_emissions_kgco2", pd.Series(dtype=float)).sum())
     inbound_cost = float(inbound_df.get("transport_cost_eur", pd.Series(dtype=float)).sum())
     inbound_em = float(inbound_df.get("transport_emissions_kgco2", pd.Series(dtype=float)).sum())
-    body_cost = float(assembly_df.get("body_assembly_cost_eur", pd.Series(dtype=float)).sum())
-    body_em = float(assembly_df.get("body_assembly_emissions_kgco2", pd.Series(dtype=float)).sum())
-    extra_cost = float(assembly_df.get("additional_item_process_cost_eur", pd.Series(dtype=float)).sum())
-    extra_em = float(assembly_df.get("additional_item_process_emissions_kgco2", pd.Series(dtype=float)).sum())
+    stage2_cost = float(assembly_df.get("total_stage2_cost_eur", pd.Series(dtype=float)).sum())
+    stage2_em = float(assembly_df.get("total_stage2_emissions_kgco2", pd.Series(dtype=float)).sum())
     market_cost = float(market_df.get("transport_cost_eur", pd.Series(dtype=float)).sum())
     market_em = float(market_df.get("transport_emissions_kgco2", pd.Series(dtype=float)).sum())
 
-    total_emissions = stage1_em + stage2_battery_em + inbound_em + body_em + extra_em + market_em
-    supply_chain_cost = stage1_cost + stage2_battery_cost + inbound_cost + body_cost + extra_cost + market_cost
+    total_emissions = stage1_em + inbound_em + stage2_em + market_em
+    supply_chain_cost = stage1_cost + inbound_cost + stage2_cost + market_cost
     fleet_cap = float(model.scenario.get("fleet_total_cap_kgco2", np.nan))
 
     product_rows = []
@@ -1513,31 +1471,24 @@ def extract_solution(result: SolveResult) -> Dict:
             if int(model.scenario.get("apply_carbon_cap", 0)) == 1 else np.nan
         )
         product_rows.append({
-            "product_id": pid,
-            "product_name_ko": product["product_name_ko"],
-            "vehicle_class": product["vehicle_class"],
-            "demand_units": demand,
+            "product_id": pid, "product_name_ko": product["product_name_ko"],
+            "vehicle_class": product["vehicle_class"], "demand_units": demand,
             "reference_vehicle_mass_kg": product["reference_vehicle_mass_kg"],
             "selected_structure_vehicle_mass_kg": model.selected_vehicle_mass[v],
             "mass_change_kg": model.selected_vehicle_mass[v] - float(product["reference_vehicle_mass_kg"]),
-            "total_cost_eur": product_cost,
-            "total_emissions_kgco2": product_em,
+            "total_cost_eur": product_cost, "total_emissions_kgco2": product_em,
             "emissions_per_vehicle_kgco2": product_em / demand if demand else np.nan,
             "reference_cap_kgco2_per_vehicle": reference_cap,
             "reference_cap_met_individually": True if not np.isfinite(reference_cap) else product_em / demand <= reference_cap + 1e-6,
         })
 
     structure_rows = []
-    all_catalog = model.items
     for v, product in model.products.iterrows():
-        for r, item in all_catalog.iterrows():
+        for r, item in model.items.iterrows():
             structure_rows.append({
-                "product_id": product["product_id"],
-                "product_name_ko": product["product_name_ko"],
-                "item_id": item["item_id"],
-                "item_name_ko": item["item_name_ko"],
-                "item_type": item["item_type"],
-                "quantity_per_vehicle": model.bom_quantity[v, r],
+                "product_id": product["product_id"], "product_name_ko": product["product_name_ko"],
+                "item_id": item["item_id"], "item_name_ko": item["item_name_ko"],
+                "item_type": item["item_type"], "quantity_per_vehicle": model.bom_quantity[v, r],
                 "flow_unit": item["flow_unit"],
                 "mass_kg_per_vehicle": model.bom_quantity[v, r] * model.mass_per_unit[v, r],
                 "stage1_process": item["stage1_process_name_ko"],
@@ -1548,30 +1499,27 @@ def extract_solution(result: SolveResult) -> Dict:
         "production_summary": production_df,
         "inbound_routes": inbound_df,
         "assembly_summary": assembly_df,
+        "stage2_item_process_summary": stage2_item_df,
         "market_routes": market_df,
         "module_summary": module_df,
         "product_summary": pd.DataFrame(product_rows),
         "product_structure_summary": pd.DataFrame(structure_rows),
         "cost_breakdown": {
-            "Stage 1 원자재·중간재 생산(모듈 방식은 배터리모듈 포함)": stage1_cost,
-            "Stage 1→2 조립지 유입 운송": inbound_cost,
-            "Stage 2 라인 배터리팩 생산·조립 / 모듈→팩 기본 0": stage2_battery_cost,
-            "Stage 2 비배터리 차체 중간가공·차량 조립": body_cost,
-            "Stage 2 선택 품목 추가 조립공정": extra_cost,
+            "Stage 1 선택 원료·배터리 생산": stage1_cost,
+            "Stage 1→2 선택 원료·배터리 운송": inbound_cost,
+            "Stage 2 원료별 중간가공·배터리·차량 조립": stage2_cost,
             "Stage 3 프랑스 시장 출시 운송": market_cost,
         },
         "emission_breakdown": {
-            "Stage 1 원자재·중간재 생산(모듈 방식은 배터리모듈 포함)": stage1_em,
-            "Stage 1→2 조립지 유입 운송": inbound_em,
-            "Stage 2 라인 배터리팩 생산·조립 / 모듈→팩 기본 0": stage2_battery_em,
-            "Stage 2 비배터리 차체 중간가공·차량 조립": body_em,
-            "Stage 2 선택 품목 추가 조립공정": extra_em,
+            "Stage 1 선택 원료·배터리 생산": stage1_em,
+            "Stage 1→2 선택 원료·배터리 운송": inbound_em,
+            "Stage 2 원료별 중간가공·배터리·차량 조립": stage2_em,
             "Stage 3 프랑스 시장 출시 운송": market_em,
         },
         "battery_process_definition": (
-            "라인 방식은 완성 배터리팩 생산비·탄소발자국을 동일 조립지의 Stage 2로 분류합니다. "
-            "모듈 방식은 10/5 kWh 모듈 생산을 Stage 1에 포함하고, 조립지의 별도 모듈→팩 "
-            "공정비·탄소발자국은 기본값 0입니다."
+            "배터리도 Stage 1 생산계수와 Stage 2 조립계수를 각각 적용합니다. 라인 방식에서는 "
+            "배터리 Stage 1 생산지와 Stage 2 조립지가 같은 국가(o=a)여야 하며, 모듈 방식에서는 "
+            "10/5 kWh 모듈을 Stage 1 국가에서 생산해 선택된 Stage 2 국가로 운송할 수 있습니다."
         ),
         "supply_chain_cost_eur": supply_chain_cost,
         "total_emissions_kgco2": total_emissions,
@@ -1582,6 +1530,7 @@ def extract_solution(result: SolveResult) -> Dict:
         "fleet_cap_met": True if not np.isfinite(fleet_cap) else total_emissions <= fleet_cap + 1e-5,
     })
     return out
+
 
 
 def solve_case(
@@ -1650,8 +1599,6 @@ def build_stage_map(result: Dict, stage: int):
 
     if stage == 1:
         production = result.get("production_summary", pd.DataFrame()).copy()
-        if result.get("production_mode") == "line" and not production.empty:
-            production = production[production["item_type"].astype(str) != "battery"]
         if production.empty:
             folium.Marker([35, 25], tooltip="Stage 1 양의 생산량 없음").add_to(fmap)
             return fmap
@@ -1728,8 +1675,6 @@ def build_stage_map(result: Dict, stage: int):
                 vehicles=("vehicle_equivalents", "sum"),
                 stage2_cost=("total_stage2_cost_eur", "sum"),
                 stage2_emissions=("total_stage2_emissions_kgco2", "sum"),
-                additional_process_cost=("additional_item_process_cost_eur", "sum"),
-                additional_process_emissions=("additional_item_process_emissions_kgco2", "sum"),
             )
             for _, row in agg_a.iterrows():
                 loc = plants.iloc[int(row["assembly_index"]) - 1]
@@ -1740,21 +1685,9 @@ def build_stage_map(result: Dict, stage: int):
                         f"Stage 2 조립지: {row['assembly_location']}<br>"
                         f"차량 조립량: {row['vehicles']:,.1f}대<br>"
                         f"Stage 2 비용: €{row['stage2_cost']:,.0f}<br>"
-                        f"Stage 2 탄소발자국: {row['stage2_emissions']:,.0f} kg CO₂-eq<br>"
-                        f"선택 품목 추가공정 비용: €{row['additional_process_cost']:,.0f}"
+                        f"Stage 2 탄소발자국: {row['stage2_emissions']:,.0f} kg CO₂-eq"
                     ),
                 ).add_to(fmap)
-        if result.get("production_mode") == "line":
-            battery_prod = result.get("production_summary", pd.DataFrame())
-            if not battery_prod.empty:
-                battery_prod = battery_prod[battery_prod["item_type"].astype(str) == "battery"]
-                for location_name, group in battery_prod.groupby("origin_location"):
-                    row = plants[plants["location_name"].astype(str) == str(location_name)].iloc[0]
-                    folium.Marker(
-                        [row["latitude"], row["longitude"]],
-                        icon=folium.Icon(color="blue", icon="bolt", prefix="fa"),
-                        tooltip=f"동일 조립지의 완성 배터리팩 생산·조립: {location_name}",
-                    ).add_to(fmap)
 
     elif stage == 3:
         routes = result.get("market_routes", pd.DataFrame()).copy()
@@ -1822,85 +1755,113 @@ def show_dataframe(df: pd.DataFrame, title: str, caption: Optional[str] = None):
 
 
 def render_item_selection(catalog: pd.DataFrame) -> List[str]:
-    st.markdown("### 제품구조 구성품 선택")
+    st.markdown("### 2.2 제품구조 원료 선택")
     st.info(
-        "체크된 원자재·중간재만 제품 BOM과 공급망에 포함됩니다. 항목을 해제하면 해당 질량과 공정이 제거되며, "
-        "다른 재료로 자동 대체되지 않습니다. 배터리는 전기자동차 모형의 필수 항목입니다."
+        "업로드 데이터에는 철강·알루미늄·기타 원자재·배터리·희토류의 Stage 1 및 Stage 2 계수가 모두 존재합니다. "
+        "여기서는 이번 최적화에 포함할 원료만 선택합니다. 기본값은 철강·알루미늄·기타 원자재·배터리이며 희토류는 해제 상태입니다."
     )
     active: List[str] = []
-    categories = [
-        ("raw_material", "원자재"),
-        ("intermediate", "중간재"),
-        ("battery", "배터리"),
-    ]
-    for item_type, label in categories:
-        subset = catalog[catalog["item_type"].astype(str) == item_type]
-        if subset.empty:
-            continue
-        st.markdown(f"**{label}**")
-        cols = st.columns(min(3, len(subset)))
-        for idx, (_, row) in enumerate(subset.iterrows()):
-            item_id = str(row["item_id"])
-            mandatory = int(row["mandatory"]) == 1
-            default = bool(int(row["default_enabled"])) or mandatory
-            with cols[idx % len(cols)]:
-                checked = st.checkbox(
-                    str(row["item_name_ko"]),
-                    value=default,
-                    disabled=mandatory,
-                    key=f"item_enabled::{item_id}",
-                    help=f"Stage 1: {row['stage1_process_name_ko']} / Stage 2: {row['stage2_process_name_ko']}",
-                )
-                if checked or mandatory:
-                    active.append(item_id)
+    cols = st.columns(min(5, max(1, len(catalog))))
+    for idx, (_, row) in enumerate(catalog.sort_values("item_index").iterrows()):
+        item_id = str(row["item_id"])
+        mandatory = int(row["mandatory"]) == 1
+        default = bool(int(row["default_enabled"])) or mandatory
+        key = f"v11_item_enabled::{item_id}"
+        if key not in st.session_state:
+            st.session_state[key] = default
+        with cols[idx % len(cols)]:
+            checked = st.checkbox(
+                str(row["item_name_ko"]), key=key, disabled=mandatory,
+                help=f"Stage 1: {row['stage1_process_name_ko']} / Stage 2: {row['stage2_process_name_ko']}",
+            )
+            if checked or mandatory:
+                active.append(item_id)
+    previous = list(st.session_state.get(SESSION_SELECTED_ITEMS_KEY, []))
+    st.session_state[SESSION_SELECTED_ITEMS_KEY] = list(active)
+    if previous and previous != list(active):
+        st.session_state.pop(SESSION_RESULTS_KEY, None)
+    selected_names = catalog.loc[catalog["item_id"].astype(str).isin(active), "item_name_ko"].astype(str).tolist()
+    st.caption("선택된 원료: " + ", ".join(selected_names))
     return active
 
 
-def render_country_selection(
+def _render_country_grid(available: Sequence[str], prefix: str, all_key: str, none_key: str) -> List[str]:
+    available = list(dict.fromkeys(str(v) for v in available))
+    b1, b2 = st.columns(2)
+    if b1.button("24개국 모두 선택", key=all_key, use_container_width=True):
+        for name in available:
+            st.session_state[prefix + name] = True
+    if b2.button("모두 해제", key=none_key, use_container_width=True):
+        for name in available:
+            st.session_state[prefix + name] = False
+    chosen: List[str] = []
+    grid = st.columns(4)
+    for i, name in enumerate(available):
+        state_key = prefix + name
+        if state_key not in st.session_state:
+            st.session_state[state_key] = True
+        with grid[i % 4]:
+            if st.checkbox(name, key=state_key):
+                chosen.append(name)
+    st.caption(f"선택: {len(chosen)} / {len(available)}개")
+    return chosen
+
+
+def render_stage_country_selection(
     catalog: pd.DataFrame,
     suppliers: pd.DataFrame,
+    processes: pd.DataFrame,
     plants: pd.DataFrame,
     active_item_ids: Sequence[str],
 ) -> Dict[str, List[str]]:
+    st.markdown("### 선택 원료별 Stage 1·Stage 2 국가 선택")
+    st.info(
+        "2번 탭에서 선택한 각 원료에 대해 Stage 1 생산 가능국가와 Stage 2 중간가공·조립 가능국가를 따로 선택합니다. "
+        "기본값은 데이터에 등록된 24개국 전체 선택입니다. 실제 차량 조립지는 선택 원료들의 Stage 2 국가집합의 교집합에서 결정됩니다."
+    )
     selected: Dict[str, List[str]] = {}
     item_lookup = catalog.set_index("item_id")
-    labels = [str(item_lookup.loc[item_id, "item_name_ko"]) for item_id in active_item_ids] + ["차량 조립지"]
-    keys = list(active_item_ids) + ["assembly"]
-    with st.expander("품목별 생산지·차량 조립지 선택", expanded=False):
-        st.caption(
-            "각 품목은 서로 다른 생산지 집합을 가질 수 있습니다. 사용자가 허용한 국가 안에서 Solver가 물량을 배분합니다."
+    all_plant_order = plants["location_name"].astype(str).tolist()
+    for item_id in active_item_ids:
+        item_name = str(item_lookup.loc[item_id, "item_name_ko"])
+        with st.expander(f"{item_name} — Stage 1·2 국가", expanded=False):
+            t1, t2 = st.tabs(["Stage 1 생산지", "Stage 2 중간가공·조립지"])
+            with t1:
+                available1_set = set(suppliers.loc[
+                    (suppliers["item_id"].astype(str) == item_id)
+                    & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
+                    "location_name",
+                ].astype(str).tolist())
+                available1 = [name for name in all_plant_order if name in available1_set]
+                selected[f"stage1::{item_id}"] = _render_country_grid(
+                    available1, f"country::stage1::{item_id}::",
+                    f"all::stage1::{item_id}", f"none::stage1::{item_id}",
+                )
+            with t2:
+                available2_set = set(processes.loc[
+                    (processes["item_id"].astype(str) == item_id)
+                    & (pd.to_numeric(processes["active_default"], errors="coerce").fillna(0).astype(int) == 1),
+                    "location_name",
+                ].astype(str).tolist())
+                available2 = [name for name in all_plant_order if name in available2_set]
+                selected[f"stage2::{item_id}"] = _render_country_grid(
+                    available2, f"country::stage2::{item_id}::",
+                    f"all::stage2::{item_id}", f"none::stage2::{item_id}",
+                )
+
+    common = set(all_plant_order)
+    for item_id in active_item_ids:
+        common &= set(selected.get(f"stage2::{item_id}", []))
+    selected["assembly"] = [name for name in all_plant_order if name in common]
+    if selected["assembly"]:
+        st.success(
+            f"선택 원료 전체에 공통으로 허용된 Stage 2 차량 조립국가: {len(selected['assembly'])}개 — "
+            + ", ".join(selected["assembly"])
         )
-        tabs = st.tabs(labels)
-        for tab, key in zip(tabs, keys):
-            with tab:
-                if key == "assembly":
-                    available = plants["location_name"].astype(str).tolist()
-                else:
-                    available = suppliers.loc[
-                        (suppliers["item_id"].astype(str) == key)
-                        & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
-                        "location_name",
-                    ].astype(str).tolist()
-                b1, b2 = st.columns(2)
-                prefix = f"country::{key}::"
-                if b1.button("모두 선택", key=f"all::{key}", use_container_width=True):
-                    for name in available:
-                        st.session_state[prefix + name] = True
-                if b2.button("모두 해제", key=f"none::{key}", use_container_width=True):
-                    for name in available:
-                        st.session_state[prefix + name] = False
-                chosen: List[str] = []
-                grid = st.columns(4)
-                for i, name in enumerate(available):
-                    state_key = prefix + name
-                    if state_key not in st.session_state:
-                        st.session_state[state_key] = True
-                    with grid[i % 4]:
-                        if st.checkbox(name, key=state_key):
-                            chosen.append(name)
-                st.caption(f"선택: {len(chosen)} / {len(available)}개")
-                selected[key] = chosen
+    else:
+        st.error("선택 원료들의 Stage 2 국가 교집합이 비어 있습니다. 최소 1개의 공통 조립국가를 남기세요.")
     return selected
+
 
 
 def product_structure_preview(
@@ -2001,8 +1962,8 @@ def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
     st.dataframe(stages, use_container_width=True, hide_index=True)
     st.markdown("## 제품구조 변경 해석")
     st.warning(
-        "품목을 제외해도 대체재가 자동으로 증가하지 않습니다. 새 품목을 추가하면 해당 BOM 질량이 차량질량에 추가됩니다. "
-        "기능적으로 동등한 설계를 비교하려면 사용자가 BOM CSV에서 제외·대체 품목의 수량을 함께 조정해야 합니다."
+        "원료를 체크 해제해도 다른 원료가 자동으로 증가하지 않습니다. 희토류를 체크하면 업로드된 희토류 BOM 질량과 "
+        "Stage 1·2 비용·탄소발자국이 추가됩니다. 기능적으로 동등한 제품구조를 비교하려면 BOM 수량을 함께 검토해야 합니다."
     )
     if tables:
         status = item_data_status(tables)
@@ -2012,21 +1973,19 @@ def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
 
 
 def render_input_tab(tables: Mapping[str, pd.DataFrame]):
-    st.header("사용자 CSV 데이터 추가·관리")
+    st.header("사용자 CSV 데이터 및 제품구조 원료 선택")
     st.info(
-        "모든 최적화 데이터는 사용자가 업로드합니다. 최초 실행 시 제공된 `base_csv` 폴더의 CSV 12개 또는 "
-        "`base_csv_upload.zip`을 업로드한 뒤 적용하세요."
+        "사용자가 철강·알루미늄·기타 원자재·배터리·희토류의 BOM, Stage 1 생산계수와 Stage 2 공정계수를 "
+        "모두 입력한 CSV 12개 또는 ZIP을 업로드하는 구조입니다."
     )
 
     st.markdown("## 2.1 필수 CSV 또는 ZIP 업로드")
     uploads = st.file_uploader(
-        "필수 데이터 파일",
-        type=["csv", "zip"],
-        accept_multiple_files=True,
-        key="v10_full_data_uploads",
-        help="ZIP 내부의 하위 폴더는 허용됩니다. 필수 파일명과 일치하는 CSV만 읽습니다.",
+        "필수 데이터 파일", type=["csv", "zip"], accept_multiple_files=True,
+        key="v11_full_data_uploads",
+        help="필수 CSV 12개 또는 base_csv_upload_v11.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
     )
-    if st.button("업로드 데이터 적용", type="primary", key="v10_apply_full_data"):
+    if st.button("업로드 데이터 적용", type="primary", key="v11_apply_full_data"):
         parsed, messages = parse_full_data_uploads(uploads)
         for message in messages:
             st.caption(message)
@@ -2044,16 +2003,15 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         c1, c2 = st.columns(2)
         with c1:
             st.download_button(
-                "현재 세션 CSV ZIP 다운로드",
-                data=make_tables_zip(tables),
-                file_name="current_ev_supply_chain_data.zip",
-                mime="application/zip",
+                "현재 세션 CSV ZIP 다운로드", data=make_tables_zip(tables),
+                file_name="current_ev_supply_chain_data_v11.zip", mime="application/zip",
                 use_container_width=True,
             )
         with c2:
-            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v10_reset_all"):
+            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v11_reset_all"):
                 st.session_state.pop(SESSION_TABLES_KEY, None)
                 st.session_state.pop(SESSION_RESULTS_KEY, None)
+                st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
                 st.rerun()
     else:
         st.warning("아직 적용된 데이터가 없습니다. 필수 CSV 12개 또는 ZIP을 업로드하세요.")
@@ -2061,134 +2019,60 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
 
     errors = validate_tables(tables)
     if errors:
-        st.warning("현재 데이터에는 아래 검증 문제가 있습니다. 새 품목 정의만 먼저 추가한 경우 관련 CSV를 적용하면 해소됩니다.")
+        st.error("현재 데이터가 검증을 통과하지 못했습니다.")
         for error in errors:
             st.write(f"- {error}")
-    else:
-        st.success("현재 데이터가 최적화 스키마와 참조 무결성 검증을 통과했습니다.")
+        return
+    st.success("철강·알루미늄·기타 원자재·배터리·희토류의 Stage 1·2 데이터 검증을 통과했습니다.")
 
-    st.markdown("## 2.2 새 원자재·중간재 정의")
+    active_item_ids = render_item_selection(tables["item_catalog.csv"].sort_values("item_index"))
+
+    st.markdown("### 2.3 선택 원료의 Stage 1·Stage 2 계수 확인")
     st.caption(
-        "여기서는 품목의 이름과 공정 속성만 정의합니다. 정의 후 아래 2.3에서 차량별 BOM, 생산지, "
-        "필요한 경우 Stage 2 추가 공정 CSV를 업로드해야 최적화에 사용할 수 있습니다."
+        "여기서는 CSV를 추가로 업로드하지 않습니다. 2.2에서 체크한 원료의 Stage 1 생산비·배출계수와 "
+        "Stage 2 중간가공·조립비·배출계수가 24개국에 모두 들어 있는지 확인합니다."
     )
-    with st.form("v10_item_definition_form", clear_on_submit=False):
-        c1, c2, c3 = st.columns(3)
-        item_id_input = c1.text_input("item_id", value="rare_earth", help="영문 소문자·숫자·밑줄. 예: rare_earth")
-        item_name = c2.text_input("화면 표시 품목명", value="희토류 원자재")
-        item_type = c3.selectbox("품목 유형", ["raw_material", "intermediate"], format_func=lambda x: {"raw_material":"원자재", "intermediate":"중간재"}[x])
-        c4, c5, c6 = st.columns(3)
-        flow_unit = c4.text_input("흐름 단위", value="kg")
-        loss_rate = c5.number_input("Stage 1 손실률", min_value=0.0, max_value=0.999, value=0.03, step=0.01, format="%.4f")
-        color_hex = c6.color_picker("지도 색상", value="#8c510a")
-        stage1_name = st.text_input("Stage 1 공정명", value="희토류 원료 → 희토류 원자재")
-        has_stage2 = st.checkbox("별도의 Stage 2 추가 공정이 있음", value=True)
-        stage2_name = st.text_input("Stage 2 추가 공정명", value="희토류 자석·구동계 부품 조립")
-        default_enabled = st.checkbox("3번 탭에서 기본 체크 상태", value=False)
-        submitted = st.form_submit_button("품목 정의 추가 또는 갱신", type="primary")
-    if submitted:
-        try:
-            item_id = _normalized_item_id(item_id_input)
-            if not item_name.strip():
-                raise ValueError("화면 표시 품목명을 입력하세요.")
-            updated = {name: frame.copy() for name, frame in tables.items()}
-            catalog = updated["item_catalog.csv"].copy()
-            existing = catalog[catalog["item_id"].astype(str) == item_id]
-            item_index = int(existing.iloc[0]["item_index"]) if not existing.empty else int(pd.to_numeric(catalog["item_index"], errors="coerce").max()) + 1
-            row = {
-                "item_index": item_index,
-                "item_id": item_id,
-                "item_name_ko": item_name.strip(),
-                "item_type": item_type,
-                "flow_unit": flow_unit.strip() or "kg",
-                "default_enabled": int(default_enabled),
-                "mandatory": 0,
-                "has_stage2_process": int(has_stage2),
-                "stage1_process_name_ko": stage1_name.strip(),
-                "stage2_process_name_ko": stage2_name.strip() if has_stage2 else "차량 일반 조립공정에 포함",
-                "color_hex": color_hex,
-                "loss_rate": float(loss_rate),
-                "source_basis": "user definition form",
-            }
-            incoming = pd.DataFrame([row])
-            updated["item_catalog.csv"] = _upsert_frame(catalog, incoming, ["item_id"])
-            _save_tables_to_session(updated)
-            st.success(f"품목 정의를 저장했습니다: {item_id} / {item_name}")
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+    catalog = tables["item_catalog.csv"].set_index("item_id")
+    suppliers = tables["item_suppliers.csv"]
+    processes = tables["stage2_item_processes.csv"]
+    for item_id in active_item_ids:
+        item_name = str(catalog.loc[item_id, "item_name_ko"])
+        with st.expander(f"{item_name} ({item_id}) 계수", expanded=False):
+            c1, c2 = st.columns(2)
+            stage1 = suppliers[suppliers["item_id"].astype(str) == item_id].copy()
+            stage2 = processes[processes["item_id"].astype(str) == item_id].copy()
+            with c1:
+                st.markdown("**Stage 1 생산계수**")
+                st.caption(
+                    f"국가 {stage1['location_name'].nunique()}개 · 비용범위 "
+                    f"{stage1['stage1_cost_per_unit'].min():,.4g}~{stage1['stage1_cost_per_unit'].max():,.4g} · "
+                    f"배출계수범위 {stage1['stage1_ef_kgco2_per_unit'].min():,.4g}~{stage1['stage1_ef_kgco2_per_unit'].max():,.4g}"
+                )
+                st.dataframe(stage1, use_container_width=True, hide_index=True)
+            with c2:
+                st.markdown("**Stage 2 중간가공·조립계수**")
+                st.caption(
+                    f"국가 {stage2['location_name'].nunique()}개 · 비용범위 "
+                    f"{stage2['process_cost_per_unit'].min():,.4g}~{stage2['process_cost_per_unit'].max():,.4g} · "
+                    f"배출계수범위 {stage2['process_ef_kgco2_per_unit'].min():,.4g}~{stage2['process_ef_kgco2_per_unit'].max():,.4g}"
+                )
+                st.dataframe(stage2, use_container_width=True, hide_index=True)
 
-    status = item_data_status(tables)
-    if not status.empty:
-        st.dataframe(status, use_container_width=True, hide_index=True)
-
-    st.markdown("## 2.3 선택 품목의 BOM·생산지·추가 공정 CSV 적용")
-    catalog = tables["item_catalog.csv"].sort_values("item_index")
-    item_options = catalog["item_id"].astype(str).tolist()
-    selected_item = st.selectbox(
-        "데이터를 적용할 품목",
-        item_options,
-        format_func=lambda item_id: f"{item_id} — {catalog.set_index('item_id').loc[item_id, 'item_name_ko']}",
-        key="v10_addon_item",
-    )
-    selected_row = catalog[catalog["item_id"].astype(str) == selected_item].iloc[0]
-    needs_process = int(selected_row["has_stage2_process"]) == 1
-    st.caption(
-        "추가 CSV에는 item_id와 item_index를 넣지 않아도 됩니다. 이 화면에서 선택한 품목의 값이 자동으로 붙습니다. "
-        "같은 제품·생산지 행이 이미 있으면 새 행으로 갱신됩니다."
-    )
-    c1, c2, c3 = st.columns(3)
-    bom_upload = c1.file_uploader("제품별 BOM 추가 CSV", type="csv", key="v10_bom_addon")
-    supplier_upload = c2.file_uploader("생산지 추가 CSV", type="csv", key="v10_supplier_addon")
-    process_upload = c3.file_uploader(
-        "Stage 2 공정 추가 CSV" + (" (필수)" if needs_process else " (선택)"),
-        type="csv", key="v10_process_addon"
-    )
-    if st.button("선택 품목 CSV 적용", type="primary", key="v10_apply_addon"):
-        try:
-            if bom_upload is None or supplier_upload is None:
-                raise ValueError("제품별 BOM 추가 CSV와 생산지 추가 CSV는 필수입니다.")
-            bom_addon = read_single_csv(bom_upload, "제품별 BOM 추가 CSV")
-            supplier_addon = read_single_csv(supplier_upload, "생산지 추가 CSV")
-            process_addon = read_single_csv(process_upload, "Stage 2 공정 추가 CSV") if process_upload is not None else None
-            updated = apply_item_addon(tables, selected_item, bom_addon, supplier_addon, process_addon)
-            _save_tables_to_session(updated)
-            st.success(f"{selected_item} 관련 CSV를 적용했습니다. 3번 탭의 제품구조 체크박스에서 활성화하세요.")
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
-
-    st.markdown("## 2.4 사용자 추가 품목 삭제")
-    removable = catalog[pd.to_numeric(catalog["mandatory"], errors="coerce").fillna(0).astype(int) == 0]
-    if not removable.empty:
-        remove_id = st.selectbox("삭제할 품목", removable["item_id"].astype(str).tolist(), key="v10_remove_item")
-        if st.button("품목 정의와 관련 데이터 삭제", key="v10_delete_item"):
-            try:
-                _save_tables_to_session(delete_custom_item(tables, remove_id))
-                st.success(f"{remove_id}를 삭제했습니다.")
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-
-    st.markdown("## 2.5 현재 입력 테이블 확인")
+    st.markdown("## 2.4 현재 입력 테이블 확인")
     display = {
-        "item_catalog.csv": "품목 카탈로그",
-        "product_bom.csv": "제품별 BOM",
-        "item_suppliers.csv": "품목별 생산지 데이터",
-        "stage2_item_processes.csv": "품목별 Stage 2 추가 공정",
-        "products.csv": "차량 종류",
-        "demand.csv": "프랑스 수요",
-        "assembly_locations.csv": "차량 조립지",
-        "transport_parameters.csv": "운송수단 계수",
-        "country_transport_rules.csv": "국가별 운송 허용규칙",
-        "markets.csv": "시장",
-        "scenarios.csv": "정책 시나리오",
-        "model_metadata.csv": "모형 메타데이터",
+        "item_catalog.csv": "품목 카탈로그", "product_bom.csv": "제품별 BOM",
+        "item_suppliers.csv": "품목별 Stage 1 생산지 데이터",
+        "stage2_item_processes.csv": "품목별 Stage 2 공정 데이터",
+        "products.csv": "차량 종류", "demand.csv": "프랑스 수요",
+        "assembly_locations.csv": "후보국가·위치", "transport_parameters.csv": "운송수단 계수",
+        "country_transport_rules.csv": "국가별 운송 허용규칙", "markets.csv": "시장",
+        "scenarios.csv": "정책 시나리오", "model_metadata.csv": "모형 메타데이터",
     }
     subtabs = st.tabs(list(display.values()))
     for tab, filename in zip(subtabs, display):
         with tab:
             st.dataframe(tables[filename], use_container_width=True, hide_index=True)
+
 
 
 def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
@@ -2228,9 +2112,9 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
     stage = {"Stage 1 생산지": 1, "Stage 2 조립지": 2, "Stage 3 프랑스 시장": 3}[stage_label]
     selected = results[chosen]
     if stage == 1:
-        st.caption("원자재·중간재 생산지를 품목별로 표시합니다. 라인 방식의 배터리팩 생산은 동일 조립지 활동이므로 Stage 2에 표시합니다.")
+        st.caption("선택 원료와 배터리의 Stage 1 생산지를 품목별로 표시합니다. 라인 방식의 배터리 Stage 1 생산지는 Stage 2 조립지와 같은 국가입니다.")
     elif stage == 2:
-        st.caption("생산지에서 조립지로 들어오는 품목별 운송경로와 차량 조립지를 표시합니다.")
+        st.caption("선택 원료의 Stage 1 생산지에서 공통 Stage 2 조립지로 들어오는 운송경로와 원료별 Stage 2 공정을 표시합니다.")
     else:
         st.caption("조립지에서 프랑스 시장으로 이동하는 완성 전기자동차 경로를 표시합니다.")
     render_stage_map(selected, stage, key=f"stage_map_{chosen[0]}_{chosen[1]}_{stage}")
@@ -2238,24 +2122,25 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
     st.markdown("## 상세 결과")
     detail_tabs = st.tabs([
         "제품구조", "차량별 결과", "Stage 1 생산", "Stage 1→2 운송",
-        "Stage 2 조립", "배터리모듈", "Stage 3 시장 출시", "Solver 정보",
+        "Stage 2 원료별 공정", "Stage 2 조립지 합계", "배터리모듈", "Stage 3 시장 출시", "Solver 정보",
     ])
     frames = [
         selected.get("product_structure_summary", pd.DataFrame()),
         selected.get("product_summary", pd.DataFrame()),
         selected.get("production_summary", pd.DataFrame()),
         selected.get("inbound_routes", pd.DataFrame()),
+        selected.get("stage2_item_process_summary", pd.DataFrame()),
         selected.get("assembly_summary", pd.DataFrame()),
         selected.get("module_summary", pd.DataFrame()),
         selected.get("market_routes", pd.DataFrame()),
     ]
-    for tab, frame in zip(detail_tabs[:7], frames):
+    for tab, frame in zip(detail_tabs[:8], frames):
         with tab:
             if isinstance(frame, pd.DataFrame) and not frame.empty:
                 st.dataframe(frame, use_container_width=True, hide_index=True)
             else:
                 st.info("표시할 양의 결과가 없습니다.")
-    with detail_tabs[7]:
+    with detail_tabs[8]:
         st.json({
             key: selected.get(key) for key in [
                 "status", "message", "solver_name", "solver_version", "solver_iterations",
@@ -2293,7 +2178,8 @@ def run_app():
     st.set_page_config(page_title="사용자 데이터 기반 EV 공급망 LP", page_icon="🚗", layout="wide")
     st.title("프랑스 전기차 보조금 탄소발자국 상한 대응 공급망 비용 최적화")
     st.caption(
-        f"build: {APP_BUILD} · 전체 CSV 사용자 업로드 · 사용자 품목 정의·추가 · 제품구조 체크박스 · Stage 1/2/3 분리 지도"
+        f"build: {APP_BUILD} · 5개 원료 데이터 사용자 업로드 · 2번 탭 원료 선택 · "
+        "3번 탭 원료별 Stage 1/2 24개국 선택 · Stage 1/2/3 분리 지도"
     )
 
     tables: Dict[str, pd.DataFrame] = {
@@ -2309,19 +2195,19 @@ def run_app():
                 st.warning(f"검증 문제 {len(errors)}개")
             else:
                 st.success("최적화 준비 데이터 검증 통과")
+            active = st.session_state.get(SESSION_SELECTED_ITEMS_KEY, [])
+            if active:
+                st.caption("2번 탭 선택 원료: " + ", ".join(active))
         else:
             st.info("2번 탭에서 CSV 또는 ZIP을 업로드하세요.")
-        if st.button("최적화 결과만 초기화", use_container_width=True, key="v10_reset_results"):
+        if st.button("최적화 결과만 초기화", use_container_width=True, key="v11_reset_results"):
             st.session_state.pop(SESSION_RESULTS_KEY, None)
             gc.collect()
             st.success("결과를 초기화했습니다.")
 
     tabs = st.tabs([
-        "1. SaaS 최적화 프레임워크 개요",
-        "2. 사용자 데이터 추가·관리",
-        "3. 최적화 실행",
-        "4. 최적화 결과",
-        "5. 분석 및 결론",
+        "1. SaaS 최적화 프레임워크 개요", "2. 사용자 데이터·원료 선택",
+        "3. 최적화 실행", "4. 최적화 결과", "5. 분석 및 결론",
     ])
 
     with tabs[0]:
@@ -2341,26 +2227,27 @@ def run_app():
                 for error in data_errors:
                     st.write(f"- {error}")
             else:
-                active_item_ids = render_item_selection(tables["item_catalog.csv"].sort_values("item_index"))
-                active_errors = []
-                ready = item_data_status(tables).set_index("item_id") if not item_data_status(tables).empty else pd.DataFrame()
-                for item_id in active_item_ids:
-                    if item_id not in ready.index or not bool(ready.loc[item_id, "최적화 사용 준비"]):
-                        active_errors.append(item_id)
-                if active_errors:
-                    st.error("선택된 품목의 BOM·생산지·공정 데이터가 완전하지 않습니다: " + ", ".join(active_errors))
+                default_items = _normalize_active_items(tables["item_catalog.csv"], None)
+                active_item_ids = list(st.session_state.get(SESSION_SELECTED_ITEMS_KEY, default_items))
+                catalog = tables["item_catalog.csv"].sort_values("item_index")
+                active_item_ids = [i for i in catalog["item_id"].astype(str).tolist() if i in set(active_item_ids)]
+                battery_ids = catalog.loc[catalog["item_type"].astype(str) == "battery", "item_id"].astype(str).tolist()
+                for battery_id in battery_ids:
+                    if battery_id not in active_item_ids:
+                        active_item_ids.append(battery_id)
+                names = catalog.set_index("item_id").loc[active_item_ids, "item_name_ko"].astype(str).tolist()
+                st.success("2번 탭에서 선택된 원료: " + ", ".join(names))
+
                 preview = product_structure_preview(tables, active_item_ids)
-                show_dataframe(
-                    preview,
-                    "선택 제품구조 미리보기",
-                    "품목 추가·제거에 따른 질량 변화입니다. 자동 대체재는 적용되지 않습니다.",
+                show_dataframe(preview, "선택 제품구조 미리보기", "희토류가 해제된 기본구조는 철강·알루미늄·기타 원자재·배터리입니다.")
+
+                selected_country_map = render_stage_country_selection(
+                    tables["item_catalog.csv"], tables["item_suppliers.csv"],
+                    tables["stage2_item_processes.csv"], tables["assembly_locations.csv"],
+                    active_item_ids,
                 )
-                selected_country_map = render_country_selection(
-                    tables["item_catalog.csv"], tables["item_suppliers.csv"], tables["assembly_locations.csv"], active_item_ids
-                )
-                valid_selection = not active_errors and all(selected_country_map.get(key) for key in [*active_item_ids, "assembly"])
-                if not valid_selection:
-                    st.error("모든 활성 품목과 차량 조립지에 최소 1개 국가를 선택하고 품목 데이터를 완성해야 합니다.")
+                required_keys = [f"stage1::{i}" for i in active_item_ids] + [f"stage2::{i}" for i in active_item_ids] + ["assembly"]
+                valid_selection = all(bool(selected_country_map.get(key)) for key in required_keys)
 
                 c1, c2, c3 = st.columns(3)
                 scenario_id = c1.selectbox(
@@ -2371,8 +2258,8 @@ def run_app():
                 time_limit = c3.number_input("Solver 제한시간(초)", min_value=10, max_value=600, value=180, step=10)
 
                 st.info(
-                    "품목 체크와 허용국가는 사용자가 정하는 모형 범위입니다. Solver는 선택된 제품구조 안에서 "
-                    "생산지·조립지·운송수단별 연속 물량을 배분하여 총비용을 최소화합니다."
+                    "원료 포함 여부와 원료별 Stage 1·2 허용국가는 사용자가 정하는 모형 범위입니다. Solver는 "
+                    "그 범위에서 생산국가, 공통 조립국가, 운송수단과 연속 물량을 배분하여 총비용을 최소화합니다."
                 )
 
                 def execute(s: str, mode: str, status_box, prefix: str = "") -> Dict:
@@ -2383,12 +2270,8 @@ def run_app():
                         status_box.info(f"{prefix}{score:.0f}점의 회사 전체 탄소발자국 상한에서 최소비용 공급망을 계산합니다.")
                     try:
                         output = solve_case(
-                            tables,
-                            scenario_id=s,
-                            production_mode=mode,
-                            time_limit_sec=int(time_limit),
-                            active_item_ids=active_item_ids,
-                            selected_country_map=selected_country_map,
+                            tables, scenario_id=s, production_mode=mode, time_limit_sec=int(time_limit),
+                            active_item_ids=active_item_ids, selected_country_map=selected_country_map,
                         )
                         if output.get("status") == "OPTIMAL":
                             status_box.success(f"{prefix}OPTIMAL 해를 찾았습니다.")
@@ -2399,10 +2282,8 @@ def run_app():
                         return output
                     except Exception as exc:
                         status_box.error(f"{prefix}ERROR: {exc}")
-                        return {
-                            "status": "ERROR", "message": str(exc), "scenario_id": s,
-                            "production_mode": mode, "active_item_ids": list(active_item_ids),
-                        }
+                        return {"status": "ERROR", "message": str(exc), "scenario_id": s,
+                                "production_mode": mode, "active_item_ids": list(active_item_ids)}
 
                 b1, b2 = st.columns(2)
                 with b1:
