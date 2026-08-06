@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Flexible EV supply-chain LP (v13.0)
+Flexible EV supply-chain LP (v14.0)
 
 Key additions
 -------------
@@ -42,11 +42,11 @@ except Exception:
     st = None
 
 
-APP_BUILD = "external-csv-five-material-six-map-views-safe-html-charts-v13.0"
-APP_PACKAGE_ID = "20260806-v13.0-no-st-bar-chart-six-map-views-item-colors-arrows"
-SESSION_TABLES_KEY = "user_tables_v13"
-SESSION_RESULTS_KEY = "optimization_results_v13"
-SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v13"
+APP_BUILD = "external-csv-mode-specific-battery-lane-maps-v14.0"
+APP_PACKAGE_ID = "20260806-v14.0-mode-specific-battery-stage2-separated-route-lanes"
+SESSION_TABLES_KEY = "user_tables_v14"
+SESSION_RESULTS_KEY = "optimization_results_v14"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v14"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -101,7 +101,7 @@ TRANSPORT_DASH = {
     6: "1,4,9,4",
 }
 FINISHED_COLOR = "#6a3d9a"
-ASSEMBLY_COLOR = "#31a354"
+ASSEMBLY_COLOR = "#111827"
 MARKET_COLOR = "orange"
 INTERNAL_ROUTE_INDEX = 0
 INTERNATIONAL_INLAND_LEG_KM = 50.0
@@ -432,6 +432,12 @@ def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
         (processes, "process_cost_per_unit", 0.0, None, "stage2_item_processes.csv"),
         (processes, "process_ef_kgco2_per_unit", 0.0, None, "stage2_item_processes.csv"),
     ]
+    for optional_col in [
+        "line_process_cost_per_unit", "line_process_ef_kgco2_per_unit",
+        "modular_process_cost_per_unit", "modular_process_ef_kgco2_per_unit",
+    ]:
+        if optional_col in processes.columns:
+            numeric_checks.append((processes, optional_col, 0.0, None, "stage2_item_processes.csv"))
     for frame, col, low, high, filename in numeric_checks:
         values = pd.to_numeric(frame[col], errors="coerce")
         if values.isna().any() or (values < low).any() or (high is not None and (values >= high).any()):
@@ -472,6 +478,19 @@ def validate_tables(tables: Mapping[str, pd.DataFrame]) -> List[str]:
         values = pd.to_numeric(rules[col], errors="coerce")
         if values.isna().any() or not values.isin([0, 1]).all():
             errors.append(f"country_transport_rules.csv.{col}: 0 또는 1만 허용됩니다.")
+
+    transport = tables["transport_parameters.csv"]
+    transport_costs = pd.to_numeric(transport["transport_cost_eur_per_kgkm"], errors="coerce")
+    if transport_costs.isna().any() or (transport_costs < 0).any():
+        errors.append("transport_parameters.csv.transport_cost_eur_per_kgkm: 0 이상의 숫자여야 합니다.")
+    if (transport_costs > 10.0).any():
+        bad_modes = transport.loc[transport_costs > 10.0, ["transport_mode", "region_class"]].astype(str)
+        labels = [f"{r.transport_mode}/{r.region_class}" for r in bad_modes.itertuples()]
+        errors.append(
+            "transport_parameters.csv: 비정상적으로 큰 운송비 계수(>10 EUR/(kg·km))가 있습니다: "
+            + ", ".join(labels[:8])
+            + ". 1,000,000과 같은 비활성화용 비용은 결과를 왜곡하므로 허용규칙 또는 실제 계수로 교체하세요."
+        )
 
     return errors
 
@@ -1027,12 +1046,21 @@ def build_flexible_lp_model(
                 supplier_ef[r, o] = float(row.iloc[0]["stage1_ef_kgco2_per_unit"])
                 supplier_capacity[r, o] = float(row.iloc[0]["capacity"])
                 active_stage1[r, o] = location_name in chosen_stage1
+        mode_cost_col = f"{production_mode}_process_cost_per_unit"
+        mode_ef_col = f"{production_mode}_process_ef_kgco2_per_unit"
         for a, location_name in enumerate(location_names):
             row = processes[(processes["item_id"].astype(str) == item_id) & (processes["location_index"].astype(int) == a + 1)]
             if row.empty:
                 raise ValueError(f"stage2_item_processes.csv: {item_id}, location_index={a+1} 누락")
-            process_cost[r, a] = float(row.iloc[0]["process_cost_per_unit"])
-            process_ef[r, a] = float(row.iloc[0]["process_ef_kgco2_per_unit"])
+            record = row.iloc[0]
+            cost_value = record.get(mode_cost_col, np.nan)
+            ef_value = record.get(mode_ef_col, np.nan)
+            if pd.isna(cost_value):
+                cost_value = record["process_cost_per_unit"]
+            if pd.isna(ef_value):
+                ef_value = record["process_ef_kgco2_per_unit"]
+            process_cost[r, a] = float(cost_value)
+            process_ef[r, a] = float(ef_value)
             active_stage2[r, a] = location_name in chosen_stage2
 
     active_assembly = np.asarray([name in set(selected_map["assembly"]) for name in location_names], dtype=bool)
@@ -1305,6 +1333,7 @@ def extract_solution(result: SolveResult) -> Dict:
         "scenario_name": str(model.scenario["scenario_name"]),
         "production_mode": model.layout.mode,
         "production_mode_name": MODE_LABEL[model.layout.mode],
+        "stage2_coefficient_mode": f"{model.layout.mode}_process_* columns (fallback: process_* columns)",
         "active_item_ids": list(model.item_ids),
         "active_item_names": model.items["item_name_ko"].astype(str).tolist(),
         "selected_country_map": {k: list(v) for k, v in model.selected_country_map.items()},
@@ -1555,7 +1584,17 @@ def solve_case(
 # -----------------------------------------------------------------------------
 # Stage-separated mapping
 # -----------------------------------------------------------------------------
-def _bezier_curve_points(start: Tuple[float, float], end: Tuple[float, float], bend: float, steps: int = 30):
+def _bezier_curve_points(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    bend: float,
+    steps: int = 44,
+):
+    """Return a quadratic Bézier route used as a visually separated lane.
+
+    ``bend`` is dimensionless relative to the start/end distance. Different items receive
+    different bends, so routes sharing the same origin and destination do not hide one another.
+    """
     lat1, lon1 = float(start[0]), float(start[1])
     lat2, lon2 = float(end[0]), float(end[1])
     dx, dy = lon2 - lon1, lat2 - lat1
@@ -1573,32 +1612,22 @@ def _bezier_curve_points(start: Tuple[float, float], end: Tuple[float, float], b
 
 
 def _flow_width(values: pd.Series, value: float) -> float:
-    """Scale route width by positive flow magnitude."""
     positives = pd.to_numeric(values, errors="coerce").dropna()
     positives = positives[positives > 0]
     if positives.empty or positives.nunique() == 1:
-        return 5.0
+        return 4.0
     low, high = float(positives.min()), float(positives.max())
-    if high <= low:
-        return 5.0
-    ratio = (math.sqrt(max(value, 0.0)) - math.sqrt(low)) / (math.sqrt(high) - math.sqrt(low))
-    return float(2.5 + max(0.0, min(1.0, ratio)) * 8.5)
+    ratio = (math.sqrt(max(value, 0.0)) - math.sqrt(low)) / max(1e-12, math.sqrt(high) - math.sqrt(low))
+    return float(2.2 + max(0.0, min(1.0, ratio)) * 6.2)
 
 
 def _production_radius(values: pd.Series, value: float) -> float:
-    """Scale Stage 1 circle radius within the same item.
-
-    Different items can have different units (kg versus kWh), so circles are normalized
-    within each item rather than across incompatible units.
-    """
     positives = pd.to_numeric(values, errors="coerce").dropna()
     positives = positives[positives > 0]
     if positives.empty or positives.nunique() == 1:
         return 9.0
     low, high = float(positives.min()), float(positives.max())
-    if high <= low:
-        return 9.0
-    ratio = (math.sqrt(max(value, 0.0)) - math.sqrt(low)) / (math.sqrt(high) - math.sqrt(low))
+    ratio = (math.sqrt(max(value, 0.0)) - math.sqrt(low)) / max(1e-12, math.sqrt(high) - math.sqrt(low))
     return float(6.0 + max(0.0, min(1.0, ratio)) * 13.0)
 
 
@@ -1612,40 +1641,61 @@ def _assembly_radius(values: pd.Series, value: float) -> float:
     return float(7.0 + max(0.0, min(1.0, ratio)) * 12.0)
 
 
-def _offset_marker_coordinate(lat: float, lon: float, rank: int, count: int) -> Tuple[float, float]:
-    """Fan out same-country item markers so differently colored circles remain visible."""
+def _offset_marker_coordinate(
+    lat: float,
+    lon: float,
+    rank: int,
+    count: int,
+    radius_deg: float = 0.34,
+) -> Tuple[float, float]:
     if count <= 1:
         return float(lat), float(lon)
     angle = 2.0 * math.pi * (rank / count)
-    radius_deg = 0.34
     lat_offset = radius_deg * math.sin(angle)
     lon_scale = max(0.35, math.cos(math.radians(float(lat))))
     lon_offset = radius_deg * math.cos(angle) / lon_scale
     return float(lat) + lat_offset, float(lon) + lon_offset
 
 
-def _add_direction_arrow(target, points: Sequence[Tuple[float, float]], color: str, tooltip: str):
-    """Place a prominent arrow near the destination end of a route."""
-    import folium
-
-    if len(points) < 3:
-        return
-    idx = min(len(points) - 2, max(1, int(round((len(points) - 1) * 0.84))))
-    p0 = points[max(0, idx - 1)]
-    p1 = points[min(len(points) - 1, idx + 1)]
-    lat, lon = points[idx]
+def _point_on_polyline(points: Sequence[Tuple[float, float]], fraction: float) -> Tuple[float, float, float]:
+    fraction = max(0.0, min(1.0, float(fraction)))
+    if len(points) < 2:
+        lat, lon = points[0]
+        return float(lat), float(lon), 0.0
+    pos = fraction * (len(points) - 1)
+    idx = min(len(points) - 2, max(0, int(math.floor(pos))))
+    alpha = pos - idx
+    p0, p1 = points[idx], points[idx + 1]
+    lat = float(p0[0]) + alpha * (float(p1[0]) - float(p0[0]))
+    lon = float(p0[1]) + alpha * (float(p1[1]) - float(p0[1]))
     mean_lat = math.radians((float(p0[0]) + float(p1[0])) / 2.0)
     dx = (float(p1[1]) - float(p0[1])) * math.cos(mean_lat)
     dy = -(float(p1[0]) - float(p0[0]))
     angle = math.degrees(math.atan2(dy, dx))
+    return lat, lon, angle
+
+
+def _add_direction_arrow(
+    target,
+    points: Sequence[Tuple[float, float]],
+    color: str,
+    tooltip: str,
+    fraction: float,
+    size: int = 20,
+):
+    import folium
+    if len(points) < 2:
+        return
+    lat, lon, angle = _point_on_polyline(points, fraction)
     html = (
-        '<div style="width:30px;height:30px;line-height:30px;text-align:center;'
-        f'color:{color};font-size:25px;font-weight:900;text-shadow:0 0 3px white,0 0 3px white;'
+        f'<div style="width:{size}px;height:{size}px;line-height:{size}px;text-align:center;'
+        f'color:{color};font-size:{size}px;font-weight:900;'
+        'text-shadow:-2px -2px 2px white,2px -2px 2px white,-2px 2px 2px white,2px 2px 2px white;'
         f'transform:rotate({angle:.2f}deg);transform-origin:center center;pointer-events:none;">➤</div>'
     )
     folium.Marker(
-        [float(lat), float(lon)],
-        icon=folium.DivIcon(html=html, icon_size=(30, 30), icon_anchor=(15, 15)),
+        [lat, lon],
+        icon=folium.DivIcon(html=html, icon_size=(size, size), icon_anchor=(size // 2, size // 2)),
         tooltip=tooltip,
     ).add_to(target)
 
@@ -1659,60 +1709,60 @@ def _add_route_line(
     tooltip: str,
     arrival_tooltip: str,
 ):
-    """Add a route line plus repeated directional symbols and a destination-side arrow."""
-    import folium
+    """Draw a white route casing, colored lane, and only three clear arrows.
 
-    line = folium.PolyLine(
-        list(points),
-        color=color,
-        weight=float(weight),
-        opacity=0.82,
-        dash_array=dash_array,
-        tooltip=tooltip,
+    The previous repeated arrow text covered nearby colored routes. Three spaced arrows preserve
+    direction while keeping each item lane readable.
+    """
+    import folium
+    folium.PolyLine(
+        list(points), color="#ffffff", weight=float(weight) + 3.2, opacity=0.86,
+        dash_array=None, interactive=False,
     ).add_to(target)
-    try:
-        from folium.plugins import PolyLineTextPath
-        PolyLineTextPath(
-            line,
-            "  ➤  ",
-            repeat=True,
-            offset=7,
-            attributes={
-                "fill": color,
-                "font-weight": "bold",
-                "font-size": "13",
-                "text-shadow": "1px 1px 2px white",
-            },
-        ).add_to(target)
-    except Exception:
-        pass
-    _add_direction_arrow(target, points, color, arrival_tooltip)
+    line = folium.PolyLine(
+        list(points), color=color, weight=float(weight), opacity=0.88,
+        dash_array=dash_array, tooltip=tooltip,
+    ).add_to(target)
+    for fraction, size in ((0.36, 17), (0.64, 17), (0.86, 23)):
+        _add_direction_arrow(target, points, color, arrival_tooltip, fraction=fraction, size=size)
     return line
 
 
-def _active_item_table(result: Dict) -> pd.DataFrame:
+def _active_item_table(result: Dict, visible_item_ids: Optional[Sequence[str]] = None) -> pd.DataFrame:
     catalog = result.get("item_catalog", pd.DataFrame()).copy()
     if catalog.empty:
         return catalog
     order = {item_id: idx for idx, item_id in enumerate(result.get("active_item_ids", []))}
     catalog["_order"] = catalog["item_id"].astype(str).map(order).fillna(10_000)
+    if visible_item_ids is not None:
+        visible = {str(v) for v in visible_item_ids}
+        catalog = catalog[catalog["item_id"].astype(str).isin(visible)]
     return catalog.sort_values(["_order", "item_index"], kind="stable").reset_index(drop=True)
 
 
-def _add_stage1_layer(result: Dict, target, show_empty_marker: bool = True):
-    """Show Stage 1 production only: item color and production-scaled circle size."""
+def _add_stage1_layer(
+    result: Dict,
+    target,
+    visible_item_ids: Optional[Sequence[str]] = None,
+    show_empty_marker: bool = True,
+):
     import folium
-
     plants = result["plants"]
-    catalog = _active_item_table(result)
-    if catalog.empty:
+    full_catalog = _active_item_table(result, None)
+    catalog = _active_item_table(result, visible_item_ids)
+    if catalog.empty or full_catalog.empty:
         return
     item_catalog = catalog.set_index("item_id")
     item_order = catalog["item_id"].astype(str).tolist()
+    full_order = full_catalog["item_id"].astype(str).tolist()
+    global_rank = {v: i for i, v in enumerate(full_order)}
     production = result.get("production_summary", pd.DataFrame()).copy()
     if production.empty:
         if show_empty_marker:
             folium.Marker([35, 25], tooltip="Stage 1 양의 생산량 없음").add_to(target)
+        return
+    production = production[production["item_id"].astype(str).isin(item_order)]
+    if production.empty:
         return
     agg = production.groupby(
         ["origin_index", "origin_location", "item_id", "item_name_ko", "flow_unit"], as_index=False
@@ -1721,29 +1771,23 @@ def _add_stage1_layer(result: Dict, target, show_empty_marker: bool = True):
         cost_eur=("stage1_cost_eur", "sum"),
         emissions_kgco2=("stage1_emissions_kgco2", "sum"),
     )
-    item_values = {
-        item_id: group["quantity"] for item_id, group in agg.groupby("item_id", sort=False)
-    }
+    item_values = {item_id: group["quantity"] for item_id, group in agg.groupby("item_id", sort=False)}
     for origin_index, location_group in agg.groupby("origin_index", sort=False):
         rows = location_group.copy()
-        rows["_rank"] = rows["item_id"].astype(str).map({v: i for i, v in enumerate(item_order)})
+        rows["_rank"] = rows["item_id"].astype(str).map(global_rank)
         rows = rows.sort_values("_rank")
         loc = plants.iloc[int(origin_index) - 1]
-        count = len(rows)
-        for rank, (_, row) in enumerate(rows.iterrows()):
+        for _, row in rows.iterrows():
             item_id = str(row["item_id"])
             color = str(item_catalog.loc[item_id, "color_hex"])
             marker_lat, marker_lon = _offset_marker_coordinate(
-                float(loc["latitude"]), float(loc["longitude"]), rank, count
+                float(loc["latitude"]), float(loc["longitude"]),
+                global_rank[item_id], len(full_order), radius_deg=0.42
             )
             folium.CircleMarker(
                 [marker_lat, marker_lon],
                 radius=_production_radius(item_values[item_id], float(row["quantity"])),
-                color=color,
-                weight=2,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.78,
+                color=color, weight=2.5, fill=True, fill_color=color, fill_opacity=0.80,
                 tooltip=(
                     f"Stage 1 생산지: {row['origin_location']}<br>"
                     f"원료·원자재: {row['item_name_ko']}<br>"
@@ -1756,9 +1800,8 @@ def _add_stage1_layer(result: Dict, target, show_empty_marker: bool = True):
 
 
 def _add_stage2_layer(result: Dict, target):
-    """Show only Stage 2 vehicle-assembly locations; no Stage 1 markers or routes."""
+    """Show only actual vehicle-assembly locations using dark navy, not material green."""
     import folium
-
     plants = result["plants"]
     assembly = result.get("assembly_summary", pd.DataFrame()).copy()
     if assembly.empty:
@@ -1773,17 +1816,13 @@ def _add_stage2_layer(result: Dict, target):
         folium.CircleMarker(
             [float(loc["latitude"]), float(loc["longitude"])],
             radius=_assembly_radius(agg["vehicles"], float(row["vehicles"])),
-            color=ASSEMBLY_COLOR,
-            weight=3,
-            fill=True,
-            fill_color=ASSEMBLY_COLOR,
-            fill_opacity=0.88,
+            color="#ffffff", weight=3.5, fill=True, fill_color=ASSEMBLY_COLOR, fill_opacity=0.96,
             tooltip=(
                 f"Stage 2 차량 조립지: {row['assembly_location']}<br>"
                 f"차량 조립량: {row['vehicles']:,.1f}대<br>"
                 f"Stage 2 비용: €{row['stage2_cost']:,.0f}<br>"
                 f"Stage 2 탄소발자국: {row['stage2_emissions']:,.0f} kg CO₂-eq<br>"
-                "원의 크기: 차량 조립량"
+                "진한 남색 원 = 차량 조립지"
             ),
         ).add_to(target)
 
@@ -1798,29 +1837,41 @@ def _add_stage3_layer(result: Dict, target):
     ).add_to(target)
 
 
+def _route_bend(item_rank: int, item_count: int, mode_index: int) -> float:
+    item_center = item_rank - (item_count - 1) / 2.0
+    mode_center = (int(mode_index) - 1) - (len(ROUTE_MODE_CODES) - 1) / 2.0
+    return float(item_center * 0.095 + mode_center * 0.008)
+
+
 def _add_stage12_route_layer(
     result: Dict,
     route_target,
+    visible_item_ids: Optional[Sequence[str]] = None,
     show_origin_markers: bool = True,
     show_stage2_markers: bool = True,
 ):
-    """Show Stage 1→2 item flows. Route color equals the selected item's color."""
     import folium
-
     plants = result["plants"]
-    catalog = _active_item_table(result)
-    if catalog.empty:
+    full_catalog = _active_item_table(result, None)
+    catalog = _active_item_table(result, visible_item_ids)
+    if catalog.empty or full_catalog.empty:
         return
     item_catalog = catalog.set_index("item_id")
+    item_order = catalog["item_id"].astype(str).tolist()
+    full_order = full_catalog["item_id"].astype(str).tolist()
+    rank_map = {v: i for i, v in enumerate(full_order)}
     inbound = result.get("inbound_routes", pd.DataFrame()).copy()
+    if show_origin_markers:
+        _add_stage1_layer(result, route_target, item_order, show_empty_marker=False)
     if not inbound.empty:
-        external = inbound[~inbound["internal_flow"].astype(bool)].copy()
+        external = inbound[
+            (~inbound["internal_flow"].astype(bool))
+            & inbound["item_id"].astype(str).isin(item_order)
+        ].copy()
         if not external.empty:
             agg = external.groupby(
-                [
-                    "origin_index", "origin_location", "assembly_index", "assembly_location",
-                    "item_id", "item_name_ko", "transport_mode_index", "transport_mode_ko",
-                ],
+                ["origin_index", "origin_location", "assembly_index", "assembly_location",
+                 "item_id", "item_name_ko", "transport_mode_index", "transport_mode_ko"],
                 as_index=False,
             ).agg(
                 flow_amount=("flow_amount", "sum"),
@@ -1832,12 +1883,20 @@ def _add_stage12_route_layer(
                 origin = plants.iloc[int(row["origin_index"]) - 1]
                 destination = plants.iloc[int(row["assembly_index"]) - 1]
                 item_id = str(row["item_id"])
+                item_rank = rank_map[item_id]
                 color = str(item_catalog.loc[item_id, "color_hex"])
-                bend = 0.07 * (1 if int(row["transport_mode_index"]) % 2 else -1)
+                # Each material uses its own visual departure/arrival lane around the real locations.
+                origin_lat, origin_lon = _offset_marker_coordinate(
+                    float(origin["latitude"]), float(origin["longitude"]),
+                    item_rank, len(full_order), radius_deg=0.42,
+                )
+                dest_lat, dest_lon = _offset_marker_coordinate(
+                    float(destination["latitude"]), float(destination["longitude"]),
+                    item_rank, len(full_order), radius_deg=0.55,
+                )
+                bend = _route_bend(item_rank, len(full_order), int(row["transport_mode_index"]))
                 curve = _bezier_curve_points(
-                    (float(origin["latitude"]), float(origin["longitude"])),
-                    (float(destination["latitude"]), float(destination["longitude"])),
-                    bend,
+                    (origin_lat, origin_lon), (dest_lat, dest_lon), bend,
                 )
                 tooltip = (
                     f"Stage 1→2 | {row['item_name_ko']}<br>"
@@ -1848,25 +1907,17 @@ def _add_stage12_route_layer(
                     f"운송 탄소발자국: {row['transport_emissions_kgco2']:,.0f} kg CO₂-eq"
                 )
                 _add_route_line(
-                    route_target,
-                    curve,
-                    color=color,
+                    route_target, curve, color=color,
                     weight=_flow_width(agg["transport_mass_kg"], float(row["transport_mass_kg"])),
                     dash_array=TRANSPORT_DASH.get(int(row["transport_mode_index"])),
                     tooltip=tooltip,
                     arrival_tooltip=f"Stage 2 도착: {row['assembly_location']} · {row['item_name_ko']}",
                 )
-                if show_origin_markers:
-                    folium.CircleMarker(
-                        [float(origin["latitude"]), float(origin["longitude"])],
-                        radius=4.5,
-                        color=color,
-                        weight=2,
-                        fill=True,
-                        fill_color=color,
-                        fill_opacity=0.86,
-                        tooltip=f"Stage 1 출발지: {row['origin_location']} · {row['item_name_ko']}",
-                    ).add_to(route_target)
+                folium.CircleMarker(
+                    [dest_lat, dest_lon], radius=4.0, color="#ffffff", weight=2,
+                    fill=True, fill_color=color, fill_opacity=0.95,
+                    tooltip=f"Stage 2 원료 도착점: {row['assembly_location']} · {row['item_name_ko']}",
+                ).add_to(route_target)
     if show_stage2_markers:
         _add_stage2_layer(result, route_target)
 
@@ -1877,9 +1928,6 @@ def _add_stage23_route_layer(
     show_stage2_markers: bool = True,
     show_market_marker: bool = True,
 ):
-    """Show Stage 2→3 finished-vehicle flows with arrows toward France."""
-    import folium
-
     plants = result["plants"]
     market = result["market"]
     routes = result.get("market_routes", pd.DataFrame()).copy()
@@ -1897,13 +1945,14 @@ def _add_stage23_route_layer(
     )
     if show_stage2_markers:
         _add_stage2_layer(result, route_target)
+    mode_count = max(1, agg["transport_mode_index"].nunique())
     for _, row in agg.iterrows():
         loc = plants.iloc[int(row["assembly_index"]) - 1]
-        bend = 0.09 * (1 if int(row["transport_mode_index"]) % 2 else -1)
+        mode_rank = sorted(agg["transport_mode_index"].unique()).index(row["transport_mode_index"])
+        bend = (mode_rank - (mode_count - 1) / 2.0) * 0.085
         curve = _bezier_curve_points(
             (float(loc["latitude"]), float(loc["longitude"])),
-            (float(market["latitude"]), float(market["longitude"])),
-            bend,
+            (float(market["latitude"]), float(market["longitude"])), bend,
         )
         tooltip = (
             "Stage 2→3 | 완성 전기자동차<br>"
@@ -1914,21 +1963,21 @@ def _add_stage23_route_layer(
             f"운송 탄소발자국: {row['emissions_kgco2']:,.0f} kg CO₂-eq"
         )
         _add_route_line(
-            route_target,
-            curve,
-            color=FINISHED_COLOR,
+            route_target, curve, color=FINISHED_COLOR,
             weight=_flow_width(agg["vehicles"], float(row["vehicles"])),
             dash_array=TRANSPORT_DASH.get(int(row["transport_mode_index"])),
-            tooltip=tooltip,
-            arrival_tooltip=f"Stage 3 도착: {market['market_name']}",
+            tooltip=tooltip, arrival_tooltip=f"Stage 3 도착: {market['market_name']}",
         )
 
 
-def _add_map_legend(fmap, result: Dict, view_code: int):
-    """Dynamic legend: each selected item uses the same color as its marker and route."""
+def _add_map_legend(
+    fmap,
+    result: Dict,
+    view_code: int,
+    visible_item_ids: Optional[Sequence[str]] = None,
+):
     import folium
-
-    catalog = _active_item_table(result)
+    catalog = _active_item_table(result, visible_item_ids)
     item_rows = []
     for _, row in catalog.iterrows():
         item_rows.append(
@@ -1941,11 +1990,12 @@ def _add_map_legend(fmap, result: Dict, view_code: int):
     <div style="position:fixed;bottom:24px;left:42px;z-index:9999;background:white;
                 border:2px solid #666;border-radius:7px;padding:10px 13px;font-size:12px;
                 max-height:330px;overflow:auto;box-shadow:0 1px 6px rgba(0,0,0,.28);">
-      <b>선택 원료·원자재 색상</b><br>{item_html}
+      <b>표시 원료·원자재 색상</b><br>{item_html}
       <hr style='margin:7px 0'>
-      <div><span style='color:{ASSEMBLY_COLOR};font-size:18px'>●</span> Stage 2 차량 조립지</div>
+      <div><span style='color:{ASSEMBLY_COLOR};font-size:18px'>●</span> Stage 2 차량 조립지(진한 남색)</div>
       <div><span style='color:{FINISHED_COLOR};font-size:18px'>━</span> Stage 2→3 완성차 운송</div>
       <div><span style='font-size:17px;font-weight:900'>➤</span> 화살표 방향 = 도착지</div>
+      <div>흰 외곽선 = 겹치는 경로 구분</div>
       <div>Stage 1 원 크기 = 동일 원료 내 생산량</div>
       <div>Stage 2 원 크기 = 차량 조립량</div>
     </div>
@@ -1953,38 +2003,46 @@ def _add_map_legend(fmap, result: Dict, view_code: int):
     fmap.get_root().html.add_child(folium.Element(html))
 
 
-def build_stage_map(result: Dict, view_code: int):
-    """Build six intuitive map views.
-
-    0  : integrated Stage 1→2→3
-    1  : Stage 1 production locations only
-    12 : Stage 1→2 transport routes
-    2  : Stage 2 vehicle-assembly locations only
-    23 : Stage 2→3 finished-vehicle routes
-    3  : Stage 3 France market only
-    """
+def build_stage_map(
+    result: Dict,
+    view_code: int,
+    visible_item_ids: Optional[Sequence[str]] = None,
+):
     import folium
     from folium.plugins import Fullscreen
-
     fmap = folium.Map(location=[35, 25], zoom_start=2, tiles="CartoDB positron")
     Fullscreen(position="topleft").add_to(fmap)
+    catalog = _active_item_table(result, visible_item_ids)
+    visible = catalog["item_id"].astype(str).tolist()
 
     if view_code == 0:
-        g1 = folium.FeatureGroup(name="Stage 1 생산지", show=True).add_to(fmap)
-        g12 = folium.FeatureGroup(name="Stage 1→2 원료·원자재 운송", show=True).add_to(fmap)
+        for _, item in catalog.iterrows():
+            iid, name = str(item["item_id"]), str(item["item_name_ko"])
+            g1 = folium.FeatureGroup(name=f"Stage 1 생산 · {name}", show=True).add_to(fmap)
+            _add_stage1_layer(result, g1, [iid], show_empty_marker=False)
+            g12 = folium.FeatureGroup(name=f"Stage 1→2 운송 · {name}", show=True).add_to(fmap)
+            _add_stage12_route_layer(result, g12, [iid], show_origin_markers=False, show_stage2_markers=False)
         g2 = folium.FeatureGroup(name="Stage 2 차량 조립지", show=True).add_to(fmap)
         g23 = folium.FeatureGroup(name="Stage 2→3 완성차 운송", show=True).add_to(fmap)
         g3 = folium.FeatureGroup(name="Stage 3 프랑스 시장", show=True).add_to(fmap)
-        _add_stage1_layer(result, g1, show_empty_marker=False)
-        _add_stage12_route_layer(result, g12, show_origin_markers=False, show_stage2_markers=False)
         _add_stage2_layer(result, g2)
         _add_stage23_route_layer(result, g23, show_stage2_markers=False, show_market_marker=False)
         _add_stage3_layer(result, g3)
         folium.LayerControl(collapsed=False, position="topright").add_to(fmap)
     elif view_code == 1:
-        _add_stage1_layer(result, fmap)
+        for _, item in catalog.iterrows():
+            iid, name = str(item["item_id"]), str(item["item_name_ko"])
+            group = folium.FeatureGroup(name=name, show=True).add_to(fmap)
+            _add_stage1_layer(result, group, [iid])
+        folium.LayerControl(collapsed=False, position="topright").add_to(fmap)
     elif view_code == 12:
-        _add_stage12_route_layer(result, fmap, show_origin_markers=True, show_stage2_markers=True)
+        for _, item in catalog.iterrows():
+            iid, name = str(item["item_id"]), str(item["item_name_ko"])
+            group = folium.FeatureGroup(name=f"{name} 경로", show=True).add_to(fmap)
+            _add_stage12_route_layer(result, group, [iid], show_origin_markers=True, show_stage2_markers=False)
+        g2 = folium.FeatureGroup(name="Stage 2 차량 조립지", show=True).add_to(fmap)
+        _add_stage2_layer(result, g2)
+        folium.LayerControl(collapsed=False, position="topright").add_to(fmap)
     elif view_code == 2:
         _add_stage2_layer(result, fmap)
     elif view_code == 23:
@@ -1994,16 +2052,22 @@ def build_stage_map(result: Dict, view_code: int):
     else:
         raise ValueError(f"지원하지 않는 지도 보기: {view_code}")
 
-    _add_map_legend(fmap, result, view_code)
+    _add_map_legend(fmap, result, view_code, visible)
     return fmap
 
 
-def render_stage_map(result: Dict, view_code: int, key: str, height: int = 600):
+def render_stage_map(
+    result: Dict,
+    view_code: int,
+    key: str,
+    visible_item_ids: Optional[Sequence[str]] = None,
+    height: int = 620,
+):
     if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
         st.warning(f"{result.get('status')}: {result.get('message')}")
         return
     from streamlit_folium import st_folium
-    fmap = build_stage_map(result, view_code)
+    fmap = build_stage_map(result, view_code, visible_item_ids=visible_item_ids)
     st_folium(fmap, width=None, height=height, key=key)
     del fmap
     gc.collect()
@@ -2031,7 +2095,7 @@ def render_item_selection(catalog: pd.DataFrame) -> List[str]:
         item_id = str(row["item_id"])
         mandatory = int(row["mandatory"]) == 1
         default = bool(int(row["default_enabled"])) or mandatory
-        key = f"v13_item_enabled::{item_id}"
+        key = f"v14_item_enabled::{item_id}"
         if key not in st.session_state:
             st.session_state[key] = default
         with cols[idx % len(cols)]:
@@ -2247,10 +2311,10 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
     st.markdown("## 2.1 필수 CSV 또는 ZIP 업로드")
     uploads = st.file_uploader(
         "필수 데이터 파일", type=["csv", "zip"], accept_multiple_files=True,
-        key="v13_full_data_uploads",
-        help="필수 CSV 12개 또는 base_csv_upload_v13.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
+        key="v14_full_data_uploads",
+        help="필수 CSV 12개 또는 base_csv_upload_v14.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
     )
-    if st.button("업로드 데이터 적용", type="primary", key="v13_apply_full_data"):
+    if st.button("업로드 데이터 적용", type="primary", key="v14_apply_full_data"):
         parsed, messages = parse_full_data_uploads(uploads)
         for message in messages:
             st.caption(message)
@@ -2269,11 +2333,11 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         with c1:
             st.download_button(
                 "현재 세션 CSV ZIP 다운로드", data=make_tables_zip(tables),
-                file_name="current_ev_supply_chain_data_v13.zip", mime="application/zip",
+                file_name="current_ev_supply_chain_data_v14.zip", mime="application/zip",
                 use_container_width=True,
             )
         with c2:
-            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v13_reset_all"):
+            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v14_reset_all"):
                 st.session_state.pop(SESSION_TABLES_KEY, None)
                 st.session_state.pop(SESSION_RESULTS_KEY, None)
                 st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
@@ -2316,11 +2380,17 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
                 st.dataframe(stage1, use_container_width=True, hide_index=True)
             with c2:
                 st.markdown("**Stage 2 중간가공·조립계수**")
-                st.caption(
-                    f"국가 {stage2['location_name'].nunique()}개 · 비용범위 "
-                    f"{stage2['process_cost_per_unit'].min():,.4g}~{stage2['process_cost_per_unit'].max():,.4g} · "
-                    f"배출계수범위 {stage2['process_ef_kgco2_per_unit'].min():,.4g}~{stage2['process_ef_kgco2_per_unit'].max():,.4g}"
-                )
+                if {"line_process_cost_per_unit", "modular_process_cost_per_unit"}.issubset(stage2.columns):
+                    st.caption(
+                        f"국가 {stage2['location_name'].nunique()}개 · 라인/모듈 생산방식별 Stage 2 계수를 별도로 사용합니다. "
+                        "배터리는 모듈→팩 구성공정 프리미엄이 modular 계수에 포함됩니다."
+                    )
+                else:
+                    st.caption(
+                        f"국가 {stage2['location_name'].nunique()}개 · 비용범위 "
+                        f"{stage2['process_cost_per_unit'].min():,.4g}~{stage2['process_cost_per_unit'].max():,.4g} · "
+                        f"배출계수범위 {stage2['process_ef_kgco2_per_unit'].min():,.4g}~{stage2['process_ef_kgco2_per_unit'].max():,.4g}"
+                    )
                 st.dataframe(stage2, use_container_width=True, hide_index=True)
 
     st.markdown("## 2.4 현재 입력 테이블 확인")
@@ -2365,13 +2435,13 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
     st.info(
         "Stage 1·2·3 위치 지도와 두 운송구간 지도를 분리했습니다. 선택 원료마다 고유한 색상을 사용하며, "
         "Stage 1 원의 크기는 동일 원료 내 국가별 생산량, Stage 2 원의 크기는 차량 조립량을 나타냅니다. "
-        "운송선의 반복 화살표와 도착지 인근 큰 화살표는 이동방향을 나타냅니다."
+        "운송선은 원료별로 서로 다른 곡선 lane과 흰 외곽선을 사용하며, 세 개의 화살표가 이동방향을 나타냅니다."
     )
     chosen = st.selectbox(
         "지도 조회 조합",
         available,
         format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-        key="stage_map_result_choice_v13",
+        key="stage_map_result_choice_v14",
     )
     map_options = [
         "전체 공급망 전과정: Stage 1→2→3",
@@ -2385,7 +2455,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 단계",
         map_options,
         horizontal=False,
-        key="stage_map_stage_choice_v13",
+        key="stage_map_stage_choice_v14",
     )
     view_code = {
         map_options[0]: 0,
@@ -2405,7 +2475,25 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         3: "최종 Stage 3 시장인 프랑스 위치만 표시합니다.",
     }
     st.caption(captions[view_code])
-    render_stage_map(selected, view_code, key=f"stage_map_v13_{chosen[0]}_{chosen[1]}_{view_code}")
+    visible_item_ids = list(selected.get("active_item_ids", []))
+    if view_code in {0, 1, 12}:
+        catalog_map = selected.get("item_catalog", pd.DataFrame()).set_index("item_id")
+        visible_item_ids = st.multiselect(
+            "지도에 표시할 원료·원자재",
+            options=list(selected.get("active_item_ids", [])),
+            default=list(selected.get("active_item_ids", [])),
+            format_func=lambda item_id: str(catalog_map.loc[item_id, "item_name_ko"]) if item_id in catalog_map.index else str(item_id),
+            key=f"map_items_v14_{chosen[0]}_{chosen[1]}_{view_code}",
+            help="경로가 겹칠 때 특정 원료만 선택하면 해당 공급경로를 분리해서 확인할 수 있습니다.",
+        )
+        if not visible_item_ids:
+            st.warning("지도에 표시할 원료를 최소 1개 선택하세요.")
+            return
+    render_stage_map(
+        selected, view_code,
+        key=f"stage_map_v14_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
+        visible_item_ids=visible_item_ids,
+    )
 
     st.markdown("## 상세 결과")
     detail_tabs = st.tabs([
@@ -2514,6 +2602,32 @@ def render_analysis_tab(results: Mapping[Tuple[str, str], Dict]):
         y_title="회사 전체 탄소발자국(kg CO₂-eq)",
     )
 
+    st.markdown("## 라인 생산 대비 모듈 생산 차이")
+    delta_rows = []
+    for scenario in ["S1", "S2", "S3"]:
+        line = results.get((scenario, "line"), {})
+        modular = results.get((scenario, "modular"), {})
+        if line.get("status") not in {"OPTIMAL", "FEASIBLE"} or modular.get("status") not in {"OPTIMAL", "FEASIBLE"}:
+            continue
+        modular_battery_external = modular.get("inbound_routes", pd.DataFrame())
+        if isinstance(modular_battery_external, pd.DataFrame) and not modular_battery_external.empty:
+            mask = (modular_battery_external["item_type"].astype(str) == "battery") & (~modular_battery_external["internal_flow"].astype(bool))
+            external_kwh = float(modular_battery_external.loc[mask, "flow_amount"].sum())
+        else:
+            external_kwh = 0.0
+        delta_rows.append({
+            "시나리오": SCENARIO_SHORT[scenario],
+            "모듈-라인 비용차(EUR)": float(modular["objective_value"]) - float(line["objective_value"]),
+            "모듈-라인 탄소차이(kgCO2-eq)": float(modular["total_emissions_kgco2"]) - float(line["total_emissions_kgco2"]),
+            "모듈 방식 외부 배터리 운송량(kWh)": external_kwh,
+        })
+    if delta_rows:
+        st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "v14에서는 배터리 Stage 2 계수를 라인/모듈 방식별로 분리합니다. 동일 국가를 선택하더라도 "
+            "모듈 방식에는 사용자 CSV의 modular_process_* 계수가 적용되므로 두 방식이 자동으로 같은 모형이 되지 않습니다."
+        )
+
     st.markdown("## 제품구조 변경 해석")
     st.markdown(
         "- 사용자가 추가한 품목을 체크하면 해당 품목의 Stage 1 생산·운송과 선택적으로 정의한 Stage 2 추가 공정이 공급망에 포함됩니다.\n"
@@ -2529,7 +2643,7 @@ def run_app():
     st.title("프랑스 전기차 보조금 탄소발자국 상한 대응 공급망 비용 최적화")
     st.caption(
         f"build: {APP_BUILD} · 5개 원료 데이터 사용자 업로드 · 2번 탭 원료 선택 · "
-        "3번 탭 원료별 Stage 1/2 24개국 선택 · 6개 지도 보기 · 원료별 색상·수량 크기 · 방향 화살표 · 안전 차트"
+        "3번 탭 원료별 Stage 1/2 24개국 선택 · 6개 지도 보기 · 원료별 분리 경로 lane · 진한 남색 조립지 · 방식별 배터리 Stage 2 계수 · 안전 차트"
     )
 
     tables: Dict[str, pd.DataFrame] = {
@@ -2551,7 +2665,7 @@ def run_app():
                 st.caption("2번 탭 선택 원료: " + ", ".join(active))
         else:
             st.info("2번 탭에서 CSV 또는 ZIP을 업로드하세요.")
-        if st.button("최적화 결과만 초기화", use_container_width=True, key="v13_reset_results"):
+        if st.button("최적화 결과만 초기화", use_container_width=True, key="v14_reset_results"):
             st.session_state.pop(SESSION_RESULTS_KEY, None)
             gc.collect()
             st.success("결과를 초기화했습니다.")
