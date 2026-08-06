@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-# Flexible EV supply-chain LP (v17.0)
-# The exact uploaded v8.20 objective, variables and constraints are retained.
-# User selections only change the active R/O/A/T index sets.
+# Flexible EV supply-chain LP (v18.0)
+# The uploaded v8.20 model is the baseline. In modular mode, every active item
+# must be produced in a Stage-1 country different from the Stage-2 vehicle assembly country.
 
 
 
@@ -30,12 +30,12 @@ except Exception:
     st = None
 
 
-APP_BUILD = "reference-v820-dynamic-R-O-A-T-copper-plastic-v17.0"
-APP_PACKAGE_ID = "20260806-v17.0-reference-v820-copper-plastic-dynamic-index"
-SESSION_TABLES_KEY = "user_tables_v17"
-SESSION_RESULTS_KEY = "optimization_results_v17"
-SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v17"
-SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v17"
+APP_BUILD = "v820-base-all-material-modular-separation-v18.0"
+APP_PACKAGE_ID = "20260806-v18.0-all-active-items-origin-not-equal-assembly"
+SESSION_TABLES_KEY = "user_tables_v18"
+SESSION_RESULTS_KEY = "optimization_results_v18"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v18"
+SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v18"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -102,7 +102,7 @@ primal_feasibility_tolerance: 1e-8
 dual_feasibility_tolerance: 1e-9
 solution_feasibility_tolerance: 1e-7
 """
-MODE_LABEL = {"line": "라인 생산", "modular": "모듈 활용 분산 생산"}
+MODE_LABEL = {"line": "라인 생산", "modular": "전 품목 모듈 활용 분산 생산"}
 SCENARIO_SHORT = {"S1": "시나리오 ①", "S2": "시나리오 ②", "S3": "시나리오 ③"}
 SCENARIO_POLICY_SCORE = {"S1": None, "S2": 60.0, "S3": 65.0}
 
@@ -1116,13 +1116,40 @@ def build_flexible_lp_model(
     for item_id in active_items:
         origin_union.update(selected_map[f"stage1::{item_id}"])
     origin_names = [name for name in all_location_order if name in origin_union]
-    assembly_names = list(selected_map["assembly"])
+    base_assembly_names = list(selected_map["assembly"])
+
+    # User-requested all-item modular separation:
+    # in modular mode, every active item must have at least one permitted Stage-1
+    # source country different from the vehicle assembly country. Assembly countries
+    # that cannot satisfy this rule are removed from the active A index before the LP
+    # variables and constraints are created.
+    if production_mode == "modular":
+        assembly_names = [
+            assembly_name
+            for assembly_name in base_assembly_names
+            if all(
+                any(origin_name != assembly_name for origin_name in selected_map[f"stage1::{item_id}"])
+                for item_id in active_items
+            )
+        ]
+        if not assembly_names:
+            raise ValueError(
+                "전 품목 모듈 분산 생산은 각 활성 원료에 대해 모듈 생산지와 차량 조립지가 달라야 합니다. "
+                "현재 Stage 1·2 국가선택으로는 이 조건을 만족하는 공통 조립국가가 없습니다."
+            )
+    else:
+        assembly_names = base_assembly_names
+
+    selected_map = dict(selected_map)
+    selected_map["assembly_before_mode_rule"] = tuple(base_assembly_names)
+    selected_map["assembly"] = tuple(assembly_names)
+
     origins = plants[plants["location_name"].astype(str).isin(origin_names)].copy().reset_index(drop=True)
     assemblies = plants[plants["location_name"].astype(str).isin(assembly_names)].copy().reset_index(drop=True)
     if origins.empty:
         raise ValueError("활성 원료의 Stage 1 생산국가 합집합이 비어 있습니다.")
     if assemblies.empty:
-        raise ValueError("활성 원료의 공통 Stage 2 차량 조립국가가 비어 있습니다.")
+        raise ValueError("생산방식 조건을 적용한 Stage 2 차량 조립국가가 비어 있습니다.")
 
     F, R, O, A, T = len(products), len(items), len(origins), len(assemblies), len(route_mode_codes)
     layout = IndexLayout(production_mode, F, R, O, A, T)
@@ -1241,21 +1268,26 @@ def build_flexible_lp_model(
                         if not active_stage1[r, o]:
                             ub[tidx] = 0.0
                             continue
+
+                        same_country = origin_location_names[o] == assembly_location_names[a]
+
+                        # In the user-requested modular mode, every active item—not only
+                        # the battery—must be manufactured as an off-site module/intermediate
+                        # good. Therefore no Stage-1→2 internal arc is permitted for any r.
+                        if production_mode == "modular" and same_country:
+                            ub[tidx] = 0.0
+                            continue
+
+                        # The line-mode battery treatment remains the uploaded v8.20 rule:
+                        # completed battery-pack production and vehicle assembly are co-located.
                         if r == battery_r and production_mode == "line":
-                            if origin_location_names[o] != assembly_location_names[a] or t != INTERNAL_ROUTE_INDEX:
+                            if not same_country or t != INTERNAL_ROUTE_INDEX:
                                 ub[tidx] = 0.0
                                 continue
                             c[tidx] = 0.0
                             emission_tin[tidx - layout.off_tin] = 0.0
                             continue
-                        if (r == battery_r and production_mode == "modular"
-                                and origin_location_names[o] == assembly_location_names[a]):
-                            if t != INTERNAL_ROUTE_INDEX:
-                                ub[tidx] = 0.0
-                                continue
-                            c[tidx] = 0.0
-                            emission_tin[tidx - layout.off_tin] = 0.0
-                            continue
+
                         if not route["raw_allowed"][o, a, t]:
                             ub[tidx] = 0.0
                             continue
@@ -1283,13 +1315,16 @@ def build_flexible_lp_model(
         for o in range(O):
             for a in range(A):
                 battery_source_active = bool(active_stage1[battery_r, o])
+                same_country = origin_location_names[o] == assembly_location_names[a]
                 if not battery_source_active:
                     ub[layout.z1(v, o, a)] = 0.0
                     if production_mode == "modular":
                         ub[layout.z2(v, o, a)] = 0.0
-                if (production_mode == "line"
-                        and origin_location_names[o] != assembly_location_names[a]):
+                if production_mode == "line" and not same_country:
                     ub[layout.z1(v, o, a)] = 0.0
+                if production_mode == "modular" and same_country:
+                    ub[layout.z1(v, o, a)] = 0.0
+                    ub[layout.z2(v, o, a)] = 0.0
 
     rows = LinearConstraintBuilder(layout.n_vars)
 
@@ -1335,6 +1370,9 @@ def build_flexible_lp_model(
                 rows.add_eq([diagonal_pack, layout.assembly(v, a)], [1.0, -1.0], 0.0)
 
     # 3) Every active non-battery item enters the same indexed material-balance equation.
+    # In modular mode the Tin upper bounds above enforce origin country != assembly country
+    # for every active non-battery item. Tin itself is the module/intermediate-good flow in
+    # the item's uploaded BOM unit; no arbitrary module-size variable is invented.
     for v in range(F):
         for r in range(R):
             if r == battery_r:
@@ -1539,7 +1577,8 @@ def extract_solution(result: SolveResult) -> Dict:
         "scenario_name": str(model.scenario["scenario_name"]),
         "production_mode": model.layout.mode,
         "production_mode_name": MODE_LABEL[model.layout.mode],
-        "model_definition": "uploaded v8.20 objective/constraints; active R, O, A and T index sets are dynamic",
+        "model_definition": "v8.20 baseline with all-active-item modular origin≠assembly extension",
+        "all_item_modular_separation": bool(model.layout.mode == "modular"),
         "active_item_ids": list(model.item_ids),
         "active_item_names": model.items["item_name_ko"].astype(str).tolist(),
         "selected_country_map": {k: list(v) for k, v in model.selected_country_map.items()},
@@ -1800,14 +1839,14 @@ def extract_solution(result: SolveResult) -> Dict:
         "cost_breakdown": {
             "Stage 1 원료·배터리 기초 생산": base_production_cost,
             "Stage 1 배터리팩·모듈 제조·조립": battery_assembly_cost,
-            "Stage 1→2 원자재·배터리 운송": inbound_cost,
+            "Stage 1→2 원료·중간재 모듈 운송": inbound_cost,
             "Stage 2 비배터리 중간가공·차량 조립": stage2_cost,
             "Stage 2→3 프랑스 시장 출시 운송": market_cost,
         },
         "emission_breakdown": {
             "Stage 1 원료·배터리 기초 생산": base_production_em,
             "Stage 1 배터리팩·모듈 제조·조립": battery_assembly_em,
-            "Stage 1→2 원자재·배터리 운송": inbound_em,
+            "Stage 1→2 원료·중간재 모듈 운송": inbound_em,
             "Stage 2 비배터리 중간가공·차량 조립": stage2_em,
             "Stage 2→3 프랑스 시장 출시 운송": market_em,
         },
@@ -1826,6 +1865,14 @@ def extract_solution(result: SolveResult) -> Dict:
             if np.isfinite(fleet_cap) and fleet_cap else np.nan
         ),
         "fleet_cap_met": True if not np.isfinite(fleet_cap) else total_emissions <= fleet_cap + 1e-5,
+        "modular_same_country_positive_flow_count": (
+            int(inbound_df["internal_flow"].astype(bool).sum())
+            if model.layout.mode == "modular" and not inbound_df.empty else 0
+        ),
+        "modular_origin_not_equal_assembly_satisfied": (
+            True if model.layout.mode != "modular" or inbound_df.empty
+            else not bool(inbound_df["internal_flow"].astype(bool).any())
+        ),
     })
     return out
 
@@ -2357,8 +2404,8 @@ def show_dataframe(df: pd.DataFrame, title: str, caption: Optional[str] = None):
 def render_item_selection(catalog: pd.DataFrame) -> List[str]:
     st.markdown("### 2.2 제품구조 원료 선택")
     st.info(
-        "업로드 데이터에는 철강·알루미늄·기타 원자재·배터리·희토류의 Stage 1 및 Stage 2 계수가 모두 존재합니다. "
-        "여기서는 이번 최적화에 포함할 원료만 선택합니다. 기본값은 철강·알루미늄·기타 원자재·배터리이며 희토류는 해제 상태입니다."
+        "업로드 데이터에는 철강·알루미늄·기타 원자재·희토류·구리·플라스틱·배터리의 Stage 1 및 Stage 2 데이터가 존재합니다. "
+        "이번 최적화에 포함할 원료만 선택합니다. 기본값은 철강·알루미늄·기타 원자재·배터리이며 희토류·구리·플라스틱은 해제 상태입니다."
     )
     active: List[str] = []
     cols = st.columns(min(5, max(1, len(catalog))))
@@ -2366,7 +2413,7 @@ def render_item_selection(catalog: pd.DataFrame) -> List[str]:
         item_id = str(row["item_id"])
         mandatory = int(row["mandatory"]) == 1
         default = bool(int(row["default_enabled"])) or mandatory
-        key = f"v17_item_enabled::{item_id}"
+        key = f"v18_item_enabled::{item_id}"
         if key not in st.session_state:
             st.session_state[key] = default
         with cols[idx % len(cols)]:
@@ -2578,7 +2625,7 @@ def render_overview_tab(tables: Optional[Mapping[str, pd.DataFrame]] = None):
         st.markdown(
             "`build_flexible_lp_model()`은 2번 탭의 활성 품목 R, 3번 탭의 Stage 1 국가 O, "
             "공통 Stage 2 국가 A, 허용 운송수단 T로 `IndexLayout`을 다시 생성합니다. "
-            "목적함수·탄소계수·7개 제약군은 이 활성 인덱스에 대해서만 생성됩니다."
+            "목적함수·탄소계수·7개 제약군은 이 활성 인덱스에 대해서만 생성됩니다. 전 품목 모듈 방식에서는 모든 활성 품목의 Stage 1 국가와 차량 조립국가가 달라야 합니다."
         )
 
     st.markdown("## Stage 구조")
@@ -2607,10 +2654,10 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
     st.markdown("## 2.1 필수 CSV 또는 ZIP 업로드")
     uploads = st.file_uploader(
         "필수 데이터 파일", type=["csv", "zip"], accept_multiple_files=True,
-        key="v17_full_data_uploads",
-        help="필수 CSV 12개 또는 base_csv_upload_v17.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
+        key="v18_full_data_uploads",
+        help="필수 CSV 12개 또는 base_csv_upload_v18.zip을 업로드하세요. 파일명은 정확히 일치해야 합니다.",
     )
-    if st.button("업로드 데이터 적용", type="primary", key="v17_apply_full_data"):
+    if st.button("업로드 데이터 적용", type="primary", key="v18_apply_full_data"):
         parsed, messages = parse_full_data_uploads(uploads)
         for message in messages:
             st.caption(message)
@@ -2629,11 +2676,11 @@ def render_input_tab(tables: Mapping[str, pd.DataFrame]):
         with c1:
             st.download_button(
                 "현재 세션 CSV ZIP 다운로드", data=make_tables_zip(tables),
-                file_name="current_ev_supply_chain_data_v17.zip", mime="application/zip",
+                file_name="current_ev_supply_chain_data_v18.zip", mime="application/zip",
                 use_container_width=True,
             )
         with c2:
-            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v17_reset_all"):
+            if st.button("업로드 데이터와 결과 초기화", use_container_width=True, key="v18_reset_all"):
                 st.session_state.pop(SESSION_TABLES_KEY, None)
                 st.session_state.pop(SESSION_RESULTS_KEY, None)
                 st.session_state.pop(SESSION_SELECTED_ITEMS_KEY, None)
@@ -2740,7 +2787,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 조회 조합",
         available,
         format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-        key="stage_map_result_choice_v17",
+        key="stage_map_result_choice_v18",
     )
     map_options = [
         "전체 공급망 전과정: Stage 1→2→3",
@@ -2754,7 +2801,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 단계",
         map_options,
         horizontal=False,
-        key="stage_map_stage_choice_v17",
+        key="stage_map_stage_choice_v18",
     )
     view_code = {
         map_options[0]: 0,
@@ -2782,7 +2829,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             options=list(selected.get("active_item_ids", [])),
             default=list(selected.get("active_item_ids", [])),
             format_func=lambda item_id: str(catalog_map.loc[item_id, "item_name_ko"]) if item_id in catalog_map.index else str(item_id),
-            key=f"map_items_v17_{chosen[0]}_{chosen[1]}_{view_code}",
+            key=f"map_items_v18_{chosen[0]}_{chosen[1]}_{view_code}",
             help="경로가 겹칠 때 특정 원료만 선택하면 해당 공급경로를 분리해서 확인할 수 있습니다.",
         )
         if not visible_item_ids:
@@ -2790,14 +2837,14 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             return
     render_stage_map(
         selected, view_code,
-        key=f"stage_map_v17_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
+        key=f"stage_map_v18_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
         visible_item_ids=visible_item_ids,
     )
 
     st.markdown("## 상세 결과")
     detail_tabs = st.tabs([
         "제품구조", "차량별 결과", "Stage 1 생산", "Stage 1→2 운송",
-        "Stage 2 원료별 공정", "Stage 2 조립지 합계", "배터리모듈", "Stage 3 시장 출시", "Solver 정보",
+        "Stage 2 원료별 공정", "Stage 2 조립지 합계", "배터리 10/5 kWh 모듈", "Stage 3 시장 출시", "Solver 정보",
     ])
     frames = [
         selected.get("product_structure_summary", pd.DataFrame()),
@@ -2823,7 +2870,9 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
                 "structure_signature", "active_item_ids", "selected_country_map",
                 "selected_transport_modes", "route_mode_codes", "active_index_sizes",
                 "fleet_total_cap_kgco2", "fleet_cap_utilization_pct", "fleet_cap_met",
-                "objective_reconstruction_gap_eur",
+                "objective_reconstruction_gap_eur", "all_item_modular_separation",
+                "modular_origin_not_equal_assembly_satisfied",
+                "modular_same_country_positive_flow_count",
             ]
         })
 
@@ -2859,7 +2908,7 @@ def render_comparison_bar_chart(
     max_value = float(chart_data[value_column].max())
     if not np.isfinite(max_value) or max_value <= 0:
         max_value = 1.0
-    mode_colors = {"라인 생산": "#1f77b4", "모듈 활용 분산 생산": "#ff7f0e"}
+    mode_colors = {"라인 생산": "#1f77b4", "전 품목 모듈 활용 분산 생산": "#ff7f0e"}
     rows = []
     for _, row in chart_data.iterrows():
         label = f"{row['시나리오']} · {row['생산방식']}"
@@ -2902,31 +2951,37 @@ def render_analysis_tab(results: Mapping[Tuple[str, str], Dict]):
         y_title="회사 전체 탄소발자국(kg CO₂-eq)",
     )
 
-    st.markdown("## 라인 생산 대비 모듈 생산 차이")
+    st.markdown("## 라인 생산 대비 전 품목 모듈 분산 생산 차이")
     delta_rows = []
     for scenario in ["S1", "S2", "S3"]:
         line = results.get((scenario, "line"), {})
         modular = results.get((scenario, "modular"), {})
         if line.get("status") not in {"OPTIMAL", "FEASIBLE"} or modular.get("status") not in {"OPTIMAL", "FEASIBLE"}:
             continue
-        modular_battery_external = modular.get("inbound_routes", pd.DataFrame())
-        if isinstance(modular_battery_external, pd.DataFrame) and not modular_battery_external.empty:
-            mask = (modular_battery_external["item_type"].astype(str) == "battery") & (~modular_battery_external["internal_flow"].astype(bool))
-            external_kwh = float(modular_battery_external.loc[mask, "flow_amount"].sum())
+        modular_inbound = modular.get("inbound_routes", pd.DataFrame())
+        if isinstance(modular_inbound, pd.DataFrame) and not modular_inbound.empty:
+            external = modular_inbound.loc[~modular_inbound["internal_flow"].astype(bool)].copy()
+            external_mass = float(external.get("transport_mass_kg", pd.Series(dtype=float)).sum())
+            external_items = int(external.get("item_id", pd.Series(dtype=str)).astype(str).nunique())
+            external_routes = int(len(external))
         else:
-            external_kwh = 0.0
+            external_mass = 0.0
+            external_items = 0
+            external_routes = 0
         delta_rows.append({
             "시나리오": SCENARIO_SHORT[scenario],
-            "모듈-라인 비용차(EUR)": float(modular["objective_value"]) - float(line["objective_value"]),
-            "모듈-라인 탄소차이(kgCO2-eq)": float(modular["total_emissions_kgco2"]) - float(line["total_emissions_kgco2"]),
-            "모듈 방식 외부 배터리 운송량(kWh)": external_kwh,
+            "전 품목 모듈-라인 비용차(EUR)": float(modular["objective_value"]) - float(line["objective_value"]),
+            "전 품목 모듈-라인 탄소차이(kgCO2-eq)": float(modular["total_emissions_kgco2"]) - float(line["total_emissions_kgco2"]),
+            "모듈 방식 외부 운송질량(kg)": external_mass,
+            "외부 운송 품목 수": external_items,
+            "양의 원료·중간재 경로 수": external_routes,
         })
     if delta_rows:
         st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
         st.caption(
-            "첨부 기준모형에서는 라인과 모듈 모두 배터리 기초 생산비와 팩/모듈 제조·조립비를 RP에 포함합니다. "
-            "두 방식의 차이는 라인의 배터리 생산지=조립지 제약과 모듈의 10/5 kWh 구성·외부운송 가능성에서 발생합니다. "
-            "모듈이 동일 국가 생산을 선택하면 결과가 같을 수도 있으며, 이는 모형 변경이 아니라 최적해의 특성입니다."
+            "전 품목 모듈 활용 분산 생산에서는 배터리뿐 아니라 선택된 모든 원료·중간재의 Stage 1 생산국가와 "
+            "Stage 2 차량 조립국가가 달라야 합니다. 배터리는 기존 10/5 kWh 구조를 유지하고, 비배터리 품목은 "
+            "업로드한 BOM 흐름단위의 RT가 모듈·중간재 흐름을 나타냅니다."
         )
 
     st.markdown("## 제품구조 변경 해석")
@@ -2947,26 +3002,6 @@ def run_app():
         name: frame.copy() for name, frame in st.session_state.get(SESSION_TABLES_KEY, {}).items()
     }
 
-    with st.sidebar:
-        st.header("세션 상태")
-        st.code(f"{APP_BUILD}\n{APP_PACKAGE_ID}", language="text")
-        if tables:
-            st.success(f"{len(tables)}개 CSV가 세션에 로드됨")
-            errors = validate_tables(tables) if all(name in tables for name in REQUIRED_FILES) else ["필수 CSV 누락"]
-            if errors:
-                st.warning(f"검증 문제 {len(errors)}개")
-            else:
-                st.success("최적화 준비 데이터 검증 통과")
-            active = st.session_state.get(SESSION_SELECTED_ITEMS_KEY, [])
-            if active:
-                st.caption("2번 탭 선택 원료: " + ", ".join(active))
-        else:
-            st.info("2번 탭에서 CSV 또는 ZIP을 업로드하세요.")
-        if st.button("최적화 결과만 초기화", use_container_width=True, key="v17_reset_results"):
-            st.session_state.pop(SESSION_RESULTS_KEY, None)
-            gc.collect()
-            st.success("결과를 초기화했습니다.")
-
     tabs = st.tabs([
         "1. SaaS 최적화 프레임워크 개요", "2. 사용자 데이터·원료 선택",
         "3. 최적화 실행", "4. 최적화 결과", "5. 분석 및 결론",
@@ -2980,6 +3015,10 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
+        if st.button("최적화 결과 초기화", key="v18_reset_results_main"):
+            st.session_state.pop(SESSION_RESULTS_KEY, None)
+            gc.collect()
+            st.success("최적화 결과를 초기화했습니다.")
         if not tables or any(name not in tables for name in REQUIRED_FILES):
             st.info("2번 탭에서 필수 CSV 12개 또는 ZIP을 먼저 업로드하세요.")
         else:
@@ -3027,6 +3066,27 @@ def run_app():
                 )
                 production_mode = c2.selectbox("생산방식", ["line", "modular"], format_func=lambda value: MODE_LABEL[value])
                 time_limit = c3.number_input("Solver 제한시간(초)", min_value=10, max_value=600, value=180, step=10)
+
+                if production_mode == "modular":
+                    base_assemblies = list(selected_country_map.get("assembly", []))
+                    feasible_modular_assemblies = [
+                        assembly_name
+                        for assembly_name in base_assemblies
+                        if all(
+                            any(origin_name != assembly_name for origin_name in selected_country_map.get(f"stage1::{item_id}", []))
+                            for item_id in active_item_ids
+                        )
+                    ]
+                    if not feasible_modular_assemblies:
+                        valid_selection = False
+                        st.error(
+                            "전 품목 모듈 생산 조건(origin ≠ assembly)을 만족하는 공통 차량 조립국가가 없습니다."
+                        )
+                    else:
+                        st.caption(
+                            "전 품목 모듈 조건 적용 후 차량 조립 후보: "
+                            + ", ".join(feasible_modular_assemblies)
+                        )
 
                 st.info(
                     "원료 포함 여부와 원료별 Stage 1·2 허용국가는 사용자가 정하는 모형 범위입니다. Solver는 "
