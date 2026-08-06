@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Flexible EV supply-chain LP (v20.0)
+# Flexible EV supply-chain LP (v21.0)
 # Every selected item follows the same line/modular algebra.
 # Line: Stage-1 origin equals Stage-2 assembly for every selected item.
 # Modular: two item-specific module sizes are produced off-site and processed at Stage 2.
@@ -31,12 +31,12 @@ except Exception:
     st = None
 
 
-APP_BUILD = "evidence-based-mass-stage1-carbon-v20.0"
-APP_PACKAGE_ID = "20260807-v20.0-evidence-mass-cradle-to-gate-factors"
-SESSION_TABLES_KEY = "user_tables_v20"
-SESSION_RESULTS_KEY = "optimization_results_v20"
-SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v20"
-SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v20"
+APP_BUILD = "mode-specific-country-selection-expanded-maps-v21.0"
+APP_PACKAGE_ID = "20260807-v21.0-line-linked-modular-independent-country-selection-expanded-maps"
+SESSION_TABLES_KEY = "user_tables_v21"
+SESSION_RESULTS_KEY = "optimization_results_v21"
+SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v21"
+SESSION_SELECTED_TRANSPORT_MODES_KEY = "selected_transport_modes_v21"
 
 REQUIRED_FILES = [
     "products.csv",
@@ -1927,7 +1927,11 @@ def build_stage_map(
 ):
     import folium
     from folium.plugins import Fullscreen
-    fmap = folium.Map(location=[35, 25], zoom_start=2, tiles="CartoDB positron")
+    fmap = folium.Map(
+        location=[28, 20], zoom_start=2, tiles=None, control_scale=True,
+        prefer_canvas=True, world_copy_jump=False, max_bounds=True,
+    )
+    folium.TileLayer("CartoDB positron", name="기본지도", no_wrap=True).add_to(fmap)
     Fullscreen(position="topleft").add_to(fmap)
     catalog = _active_item_table(result, visible_item_ids)
     visible = catalog["item_id"].astype(str).tolist()
@@ -1969,8 +1973,59 @@ def build_stage_map(
     else:
         raise ValueError(f"지원하지 않는 지도 보기: {view_code}")
 
-    _add_map_legend(fmap, result, view_code, visible)
+    # Fit the visible positive-flow network with generous padding so route curves and arrows
+    # remain visible after zooming. Stage 2→3 views always include the French market.
+    bounds = []
+    plants = result.get("plants", pd.DataFrame())
+    if view_code in {0, 1, 12}:
+        prod = result.get("production_summary", pd.DataFrame())
+        if isinstance(prod, pd.DataFrame) and not prod.empty:
+            for idx in prod.get("origin_index", pd.Series(dtype=int)).dropna().astype(int).unique():
+                loc = plants.iloc[int(idx) - 1]
+                bounds.append([float(loc["latitude"]), float(loc["longitude"])])
+    if view_code in {0, 12, 2, 23}:
+        assy = result.get("assembly_summary", pd.DataFrame())
+        if isinstance(assy, pd.DataFrame) and not assy.empty:
+            for idx in assy.get("assembly_index", pd.Series(dtype=int)).dropna().astype(int).unique():
+                loc = plants.iloc[int(idx) - 1]
+                bounds.append([float(loc["latitude"]), float(loc["longitude"])])
+    if view_code in {0, 23}:
+        market = result.get("market", {})
+        if market:
+            bounds.append([float(market["latitude"]), float(market["longitude"])])
+    if bounds:
+        fmap.fit_bounds(bounds, padding=(55, 55), max_zoom=4)
     return fmap
+
+
+def render_map_legend_above(
+    result: Dict,
+    view_code: int,
+    visible_item_ids: Optional[Sequence[str]] = None,
+):
+    import html
+    catalog = _active_item_table(result, visible_item_ids)
+    chips = []
+    for _, row in catalog.iterrows():
+        chips.append(
+            f"<span style='display:inline-flex;align-items:center;gap:5px;margin:3px 12px 3px 0;'>"
+            f"<span style='width:12px;height:12px;border-radius:50%;background:{row['color_hex']};"
+            "border:1px solid #555;display:inline-block;'></span>"
+            f"{html.escape(str(row['item_name_ko']))}</span>"
+        )
+    extras = (
+        f"<span style='margin-right:14px;color:{ASSEMBLY_COLOR};font-weight:700;'>● Stage 2 차량 조립지</span>"
+        f"<span style='margin-right:14px;color:{FINISHED_COLOR};font-weight:700;'>━ Stage 2→3 완성차 운송</span>"
+        "<span style='font-weight:700;'>➤ 화살표 방향 = 도착지</span>"
+    )
+    st.markdown(
+        "<div style='border:1px solid #d5dae3;border-radius:8px;padding:9px 12px;"
+        "background:#fff;margin:4px 0 10px 0;font-size:13px;'>"
+        "<b>지도 범례</b><br>" + "".join(chips) + "<br>" + extras +
+        "<div style='margin-top:5px;color:#555;'>Stage 1 원 크기 = 동일 원료 내 생산량 · "
+        "Stage 2 원 크기 = 차량 조립량 · 흰 외곽선 = 겹치는 경로 구분</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_stage_map(
@@ -1978,14 +2033,15 @@ def render_stage_map(
     view_code: int,
     key: str,
     visible_item_ids: Optional[Sequence[str]] = None,
-    height: int = 620,
+    height: int = 850,
 ):
     if result.get("status") not in {"OPTIMAL", "FEASIBLE"}:
         st.warning(f"{result.get('status')}: {result.get('message')}")
         return
     from streamlit_folium import st_folium
+    render_map_legend_above(result, view_code, visible_item_ids)
     fmap = build_stage_map(result, view_code, visible_item_ids=visible_item_ids)
-    st_folium(fmap, width=None, height=height, key=key)
+    st_folium(fmap, width=1650, height=height, key=key)
     del fmap
     gc.collect()
 
@@ -2012,7 +2068,7 @@ def render_item_selection(catalog: pd.DataFrame) -> List[str]:
         item_id = str(row["item_id"])
         mandatory = int(row["mandatory"]) == 1
         default = bool(int(row["default_enabled"])) or mandatory
-        key = f"v20_item_enabled::{item_id}"
+        key = f"v21_item_enabled::{item_id}"
         if key not in st.session_state:
             st.session_state[key] = default
         with cols[idx % len(cols)]:
@@ -2059,51 +2115,87 @@ def render_stage_country_selection(
     processes: pd.DataFrame,
     plants: pd.DataFrame,
     active_item_ids: Sequence[str],
+    production_mode: str,
 ) -> Dict[str, List[str]]:
-    st.markdown("### 선택 원료별 Stage 1·Stage 2 국가 선택")
+    """Render country checkboxes for one production mode.
+
+    Line production uses one linked country set per item. Every country selected for an item
+    is simultaneously allowed as its Stage 1 production country and Stage 2 processing country.
+    Modular production keeps Stage 1 and Stage 2 selections independent.
+    """
     selected: Dict[str, List[str]] = {}
     item_lookup = catalog.set_index("item_id")
     all_plant_order = plants["location_name"].astype(str).tolist()
+    mode_key = "line" if production_mode == "line" else "modular"
+
+    if production_mode == "line":
+        st.info(
+            "라인 생산방식에서는 각 원료의 Stage 1 생산지와 Stage 2 가공·조립지가 동일해야 합니다. "
+            "따라서 원료별 국가 체크박스 하나가 Stage 1과 Stage 2에 동시에 적용됩니다. "
+            "기본값은 데이터에 공통 등록된 24개국 전체 선택입니다."
+        )
+    else:
+        st.info(
+            "모듈 생산방식에서는 각 원료의 Stage 1 모듈 생산국가와 Stage 2 가공·차량 조립국가를 독립적으로 선택합니다. "
+            "Solver는 선택된 범위에서 Stage 1 생산지와 Stage 2 조립지가 서로 다른 공급망만 사용합니다. "
+            "기본값은 Stage 1과 Stage 2 모두 24개국 전체 선택입니다."
+        )
+
     for item_id in active_item_ids:
         item_name = str(item_lookup.loc[item_id, "item_name_ko"])
-        with st.expander(f"{item_name} — Stage 1·2 국가", expanded=False):
-            t1, t2 = st.tabs(["Stage 1 생산지", "Stage 2 중간가공·조립지"])
-            with t1:
-                available1_set = set(suppliers.loc[
-                    (suppliers["item_id"].astype(str) == item_id)
-                    & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
-                    "location_name",
-                ].astype(str).tolist())
-                available1 = [name for name in all_plant_order if name in available1_set]
-                selected[f"stage1::{item_id}"] = _render_country_grid(
-                    available1, f"country::stage1::{item_id}::",
-                    f"all::stage1::{item_id}", f"none::stage1::{item_id}",
+        available1_set = set(suppliers.loc[
+            (suppliers["item_id"].astype(str) == item_id)
+            & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
+            "location_name",
+        ].astype(str).tolist())
+        available2_set = set(processes.loc[
+            (processes["item_id"].astype(str) == item_id)
+            & (pd.to_numeric(processes["active_default"], errors="coerce").fillna(0).astype(int) == 1),
+            "location_name",
+        ].astype(str).tolist())
+
+        if production_mode == "line":
+            available = [name for name in all_plant_order if name in available1_set and name in available2_set]
+            with st.expander(f"{item_name} — 동일 생산·가공·조립국가", expanded=False):
+                linked = _render_country_grid(
+                    available,
+                    f"country::{mode_key}::linked::{item_id}::",
+                    f"all::{mode_key}::linked::{item_id}",
+                    f"none::{mode_key}::linked::{item_id}",
                 )
-            with t2:
-                available2_set = set(processes.loc[
-                    (processes["item_id"].astype(str) == item_id)
-                    & (pd.to_numeric(processes["active_default"], errors="coerce").fillna(0).astype(int) == 1),
-                    "location_name",
-                ].astype(str).tolist())
-                available2 = [name for name in all_plant_order if name in available2_set]
-                selected[f"stage2::{item_id}"] = _render_country_grid(
-                    available2, f"country::stage2::{item_id}::",
-                    f"all::stage2::{item_id}", f"none::stage2::{item_id}",
-                )
+                selected[f"stage1::{item_id}"] = list(linked)
+                selected[f"stage2::{item_id}"] = list(linked)
+        else:
+            available1 = [name for name in all_plant_order if name in available1_set]
+            available2 = [name for name in all_plant_order if name in available2_set]
+            with st.expander(f"{item_name} — Stage 1·2 독립 국가선택", expanded=False):
+                t1, t2 = st.tabs(["Stage 1 모듈 생산지", "Stage 2 가공·차량 조립지"])
+                with t1:
+                    selected[f"stage1::{item_id}"] = _render_country_grid(
+                        available1,
+                        f"country::{mode_key}::stage1::{item_id}::",
+                        f"all::{mode_key}::stage1::{item_id}",
+                        f"none::{mode_key}::stage1::{item_id}",
+                    )
+                with t2:
+                    selected[f"stage2::{item_id}"] = _render_country_grid(
+                        available2,
+                        f"country::{mode_key}::stage2::{item_id}::",
+                        f"all::{mode_key}::stage2::{item_id}",
+                        f"none::{mode_key}::stage2::{item_id}",
+                    )
 
     common = set(all_plant_order)
     for item_id in active_item_ids:
         common &= set(selected.get(f"stage2::{item_id}", []))
     selected["assembly"] = [name for name in all_plant_order if name in common]
-    if selected["assembly"]:
-        st.success(
-            f"선택 원료 전체에 공통으로 허용된 Stage 2 차량 조립국가: {len(selected['assembly'])}개 — "
-            + ", ".join(selected["assembly"])
-        )
-    else:
-        st.error("선택 원료들의 Stage 2 국가 교집합이 비어 있습니다. 최소 1개의 공통 조립국가를 남기세요.")
-    return selected
 
+    if selected["assembly"]:
+        label = "라인 생산 공통국가" if production_mode == "line" else "모듈 생산 공통 Stage 2 차량 조립국가"
+        st.success(f"{label}: {len(selected['assembly'])}개 — " + ", ".join(selected["assembly"]))
+    else:
+        st.error("선택 원료 전체에 공통으로 허용되는 Stage 2 차량 조립국가가 없습니다.")
+    return selected
 
 
 
@@ -2385,7 +2477,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "지도 조회 조합",
         available,
         format_func=lambda key: f"{SCENARIO_SHORT[key[0]]} · {MODE_LABEL[key[1]]}",
-        key="stage_map_result_choice_v20",
+        key="stage_map_result_choice_v21",
     )
     map_options = [
         "전체 공급망 전과정: Stage 1→2→3",
@@ -2393,13 +2485,12 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         "Stage 1→2 원료·원자재 운송경로",
         "Stage 2 차량 조립지",
         "Stage 2→3 완성차 운송경로",
-        "Stage 3 프랑스 시장",
     ]
     stage_label = st.radio(
         "지도 단계",
         map_options,
         horizontal=False,
-        key="stage_map_stage_choice_v20",
+        key="stage_map_stage_choice_v21",
     )
     view_code = {
         map_options[0]: 0,
@@ -2407,7 +2498,6 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         map_options[2]: 12,
         map_options[3]: 2,
         map_options[4]: 23,
-        map_options[5]: 3,
     }[stage_label]
     selected = results[chosen]
     captions = {
@@ -2415,8 +2505,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
         1: "원료·원자재별 색상과 생산량에 비례한 원 크기로 Stage 1 생산지만 표시합니다.",
         12: "Stage 1 생산지에서 Stage 2 차량 조립지로 이동하는 품목별 경로와 방향 화살표를 표시합니다.",
         2: "Stage 2에서 실제로 차량을 조립하는 국가만 표시합니다. 원의 크기는 조립 차량대수입니다.",
-        23: "Stage 2 차량 조립지에서 Stage 3 프랑스 시장으로 이동하는 완성차 경로와 방향 화살표를 표시합니다.",
-        3: "최종 Stage 3 시장인 프랑스 위치만 표시합니다.",
+        23: "Stage 2 차량 조립지에서 프랑스 시장으로 이동하는 완성차 경로, 방향 화살표와 최종 시장 위치를 함께 표시합니다.",
     }
     st.caption(captions[view_code])
     visible_item_ids = list(selected.get("active_item_ids", []))
@@ -2427,7 +2516,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             options=list(selected.get("active_item_ids", [])),
             default=list(selected.get("active_item_ids", [])),
             format_func=lambda item_id: str(catalog_map.loc[item_id, "item_name_ko"]) if item_id in catalog_map.index else str(item_id),
-            key=f"map_items_v20_{chosen[0]}_{chosen[1]}_{view_code}",
+            key=f"map_items_v21_{chosen[0]}_{chosen[1]}_{view_code}",
             help="경로가 겹칠 때 특정 원료만 선택하면 해당 공급경로를 분리해서 확인할 수 있습니다.",
         )
         if not visible_item_ids:
@@ -2435,7 +2524,7 @@ def render_results_tab(results: Mapping[Tuple[str, str], Dict]):
             return
     render_stage_map(
         selected, view_code,
-        key=f"stage_map_v20_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
+        key=f"stage_map_v21_{chosen[0]}_{chosen[1]}_{view_code}_{'_'.join(visible_item_ids)}",
         visible_item_ids=visible_item_ids,
     )
 
@@ -2612,7 +2701,7 @@ def run_app():
 
     with tabs[2]:
         st.header("최적화 실행")
-        if st.button("최적화 결과 초기화", key="v20_reset_results_main"):
+        if st.button("최적화 결과 초기화", key="v21_reset_results_main"):
             st.session_state.pop(SESSION_RESULTS_KEY, None)
             gc.collect()
             st.success("최적화 결과를 초기화했습니다.")
@@ -2639,22 +2728,46 @@ def run_app():
                 preview = product_structure_preview(tables, active_item_ids)
                 show_dataframe(preview, "선택 제품구조 미리보기", "기본구조는 철강·알루미늄·기타 원자재·배터리이며 희토류·구리·플라스틱은 선택사항입니다.")
 
-                selected_country_map = render_stage_country_selection(
-                    tables["item_catalog.csv"], tables["item_suppliers.csv"],
-                    tables["stage2_item_processes.csv"], tables["assembly_locations.csv"],
-                    active_item_ids,
+                st.markdown("### 선택 원료별 Stage 1·Stage 2 국가 선택")
+                st.write(
+                    "라인 생산과 모듈 생산은 국가 제약이 다르므로 아래 두 하위 탭에서 국가를 별도로 설정합니다. "
+                    "라인 생산은 원료별 Stage 1 생산지와 Stage 2 가공·조립지가 반드시 동일하므로 하나의 연결된 국가 체크박스를 사용합니다. "
+                    "모듈 생산은 Stage 1 모듈 생산국가와 Stage 2 가공·차량 조립국가를 독립적으로 선택합니다. "
+                    "두 방식 모두 최초 기본값은 24개 후보국가 전체 선택입니다."
                 )
+                line_country_tab, modular_country_tab = st.tabs([
+                    "라인 생산 국가선택", "모듈 생산 국가선택"
+                ])
+                with line_country_tab:
+                    line_country_map = render_stage_country_selection(
+                        tables["item_catalog.csv"], tables["item_suppliers.csv"],
+                        tables["stage2_item_processes.csv"], tables["assembly_locations.csv"],
+                        active_item_ids, production_mode="line",
+                    )
+                with modular_country_tab:
+                    modular_country_map = render_stage_country_selection(
+                        tables["item_catalog.csv"], tables["item_suppliers.csv"],
+                        tables["stage2_item_processes.csv"], tables["assembly_locations.csv"],
+                        active_item_ids, production_mode="modular",
+                    )
+                country_maps = {"line": line_country_map, "modular": modular_country_map}
                 selected_transport_modes = render_transport_mode_selection()
-                required_keys = [f"stage1::{i}" for i in active_item_ids] + [f"stage2::{i}" for i in active_item_ids] + ["assembly"]
-                valid_selection = (
-                    all(bool(selected_country_map.get(key)) for key in required_keys)
-                    and bool(selected_transport_modes)
-                )
-                show_dataframe(
-                    active_index_preview(active_item_ids, selected_country_map, selected_transport_modes),
-                    "현재 최적화에 적용되는 인덱스",
-                    "목적함수·탄소발자국 합계·물량수지는 이 활성 인덱스에 대해서만 생성됩니다.",
-                )
+
+                valid_selection_by_mode = {}
+                for mode, country_map in country_maps.items():
+                    required_keys = [f"stage1::{i}" for i in active_item_ids] + [f"stage2::{i}" for i in active_item_ids] + ["assembly"]
+                    valid_selection_by_mode[mode] = (
+                        all(bool(country_map.get(key)) for key in required_keys)
+                        and bool(selected_transport_modes)
+                    )
+                preview_tabs = st.tabs(["라인 생산 활성 인덱스", "모듈 생산 활성 인덱스"])
+                for tab, mode in zip(preview_tabs, ["line", "modular"]):
+                    with tab:
+                        show_dataframe(
+                            active_index_preview(active_item_ids, country_maps[mode], selected_transport_modes),
+                            f"{MODE_LABEL[mode]}에 적용되는 인덱스",
+                            "목적함수·탄소발자국 합계·물량수지는 해당 생산방식의 활성 인덱스에 대해서만 생성됩니다.",
+                        )
 
                 c1, c2, c3 = st.columns(3)
                 scenario_id = c1.selectbox(
@@ -2664,6 +2777,8 @@ def run_app():
                 production_mode = c2.selectbox("생산방식", ["line", "modular"], format_func=lambda value: MODE_LABEL[value])
                 time_limit = c3.number_input("Solver 제한시간(초)", min_value=10, max_value=600, value=180, step=10)
 
+                selected_country_map = country_maps[production_mode]
+                valid_selection = bool(valid_selection_by_mode.get(production_mode, False))
                 base_assemblies = list(selected_country_map.get("assembly", []))
                 if production_mode == "line":
                     feasible = [a for a in base_assemblies if all(a in selected_country_map.get(f"stage1::{i}", []) for i in active_item_ids)]
@@ -2690,7 +2805,7 @@ def run_app():
                     try:
                         output = solve_case(
                             tables, scenario_id=s, production_mode=mode, time_limit_sec=int(time_limit),
-                            active_item_ids=active_item_ids, selected_country_map=selected_country_map,
+                            active_item_ids=active_item_ids, selected_country_map=country_maps[mode],
                             selected_transport_modes=selected_transport_modes,
                         )
                         if output.get("status") == "OPTIMAL":
@@ -2713,7 +2828,7 @@ def run_app():
                         result = execute(scenario_id, production_mode, box)
                         st.session_state.setdefault(SESSION_RESULTS_KEY, {})[(scenario_id, production_mode)] = result
                 with b2:
-                    if st.button("3개 시나리오 × 2개 생산방식 실행", use_container_width=True, disabled=not valid_selection):
+                    if st.button("3개 시나리오 × 2개 생산방식 실행", use_container_width=True, disabled=not all(valid_selection_by_mode.values())):
                         results = st.session_state.setdefault(SESSION_RESULTS_KEY, {})
                         progress = st.progress(0.0)
                         box = st.empty()
