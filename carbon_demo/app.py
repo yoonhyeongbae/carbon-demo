@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Flexible EV supply-chain LP (v21.0)
+# Flexible EV supply-chain LP (v21.1)
 # Every selected item follows the same line/modular algebra.
 # Line: Stage-1 origin equals Stage-2 assembly for every selected item.
 # Modular: two item-specific module sizes are produced off-site and processed at Stage 2.
@@ -31,8 +31,8 @@ except Exception:
     st = None
 
 
-APP_BUILD = "mode-specific-country-selection-expanded-maps-v21.0"
-APP_PACKAGE_ID = "20260807-v21.0-line-linked-modular-independent-country-selection-expanded-maps"
+APP_BUILD = "mode-specific-country-selection-expanded-maps-v21.1"
+APP_PACKAGE_ID = "20260807-v21.1-line-linked-modular-independent-country-selection-expanded-maps"
 SESSION_TABLES_KEY = "user_tables_v21"
 SESSION_RESULTS_KEY = "optimization_results_v21"
 SESSION_SELECTED_ITEMS_KEY = "selected_item_ids_v21"
@@ -1744,13 +1744,44 @@ def _add_stage2_layer(result: Dict, target):
         ).add_to(target)
 
 
+def _market_record(result: Mapping) -> Optional[Dict[str, object]]:
+    """Return one scalar market record without evaluating pandas objects as booleans.
+
+    ``result["market"]`` is normally a pandas Series, but saved session results or
+    future data loaders may provide a one-row DataFrame or a plain mapping.  Pandas
+    Series/DataFrame objects cannot be used in ``if market:`` because their truth value
+    is ambiguous.  This helper normalizes all supported forms to a plain dict.
+    """
+    raw = result.get("market")
+    if raw is None:
+        return None
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return None
+        raw = raw.iloc[0]
+    if isinstance(raw, pd.Series):
+        raw = raw.to_dict()
+    elif isinstance(raw, Mapping):
+        raw = dict(raw)
+    else:
+        return None
+
+    required = ("latitude", "longitude")
+    if any(key not in raw or pd.isna(raw[key]) for key in required):
+        return None
+    return raw
+
+
 def _add_stage3_layer(result: Dict, target):
     import folium
-    market = result["market"]
+    market = _market_record(result)
+    if market is None:
+        return
+    market_name = str(market.get("market_name", market.get("location_name", "프랑스 시장")))
     folium.Marker(
         [float(market["latitude"]), float(market["longitude"])],
         icon=folium.Icon(color=MARKET_COLOR, icon="shopping-cart", prefix="fa"),
-        tooltip=f"Stage 3 프랑스 시장: {market['market_name']}",
+        tooltip=f"Stage 3 프랑스 시장: {market_name}",
     ).add_to(target)
 
 
@@ -1846,10 +1877,13 @@ def _add_stage23_route_layer(
     show_market_marker: bool = True,
 ):
     plants = result["plants"]
-    market = result["market"]
+    market = _market_record(result)
     routes = result.get("market_routes", pd.DataFrame()).copy()
     if show_market_marker:
         _add_stage3_layer(result, route_target)
+    if market is None:
+        return
+    market_name = str(market.get("market_name", market.get("location_name", "프랑스 시장")))
     if routes.empty:
         return
     agg = routes.groupby(
@@ -1873,7 +1907,7 @@ def _add_stage23_route_layer(
         )
         tooltip = (
             "Stage 2→3 | 완성 전기자동차<br>"
-            f"{row['assembly_location']} → {market['market_name']}<br>"
+            f"{row['assembly_location']} → {market_name}<br>"
             f"운송수단: {row['transport_mode_ko']}<br>"
             f"차량: {row['vehicles']:,.1f}대<br>"
             f"운송비용: €{row['cost_eur']:,.0f}<br>"
@@ -1883,7 +1917,7 @@ def _add_stage23_route_layer(
             route_target, curve, color=FINISHED_COLOR,
             weight=_flow_width(agg["vehicles"], float(row["vehicles"])),
             dash_array=TRANSPORT_DASH.get(int(row["transport_mode_index"])),
-            tooltip=tooltip, arrival_tooltip=f"Stage 3 도착: {market['market_name']}",
+            tooltip=tooltip, arrival_tooltip=f"Stage 3 도착: {market_name}",
         )
 
 
@@ -1990,8 +2024,8 @@ def build_stage_map(
                 loc = plants.iloc[int(idx) - 1]
                 bounds.append([float(loc["latitude"]), float(loc["longitude"])])
     if view_code in {0, 23}:
-        market = result.get("market", {})
-        if market:
+        market = _market_record(result)
+        if market is not None:
             bounds.append([float(market["latitude"]), float(market["longitude"])])
     if bounds:
         fmap.fit_bounds(bounds, padding=(55, 55), max_zoom=4)
