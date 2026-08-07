@@ -1,8 +1,7 @@
-"""Public Python API for the EV carbon supply-chain optimizer.
+"""GUI-independent public API for the EV carbon supply-chain optimizer.
 
-This module intentionally contains no GUI dependency. It wraps the validated v21.1
-optimization engine so ERP/MES integration code can call the same solver used by the
-Flet desktop application.
+The Flet desktop GUI imports this module.  This module does not import Flet,
+Streamlit, Folium, or any browser/UI package.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ import pandas as pd
 import legacy_core as core
 
 
-class _NamedBytesIO(io.BytesIO):
+class NamedBytesIO(io.BytesIO):
     def __init__(self, payload: bytes, name: str):
         super().__init__(payload)
         self.name = name
@@ -31,7 +30,9 @@ class OptimizationRequest:
     time_limit_sec: int = 180
     active_item_ids: Tuple[str, ...] = field(default_factory=tuple)
     selected_country_map: Mapping[str, Sequence[str]] = field(default_factory=dict)
-    selected_transport_modes: Tuple[str, ...] = field(default_factory=lambda: tuple(core.ROUTE_MODE_CODES))
+    selected_transport_modes: Tuple[str, ...] = field(
+        default_factory=lambda: tuple(core.ROUTE_MODE_CODES)
+    )
 
 
 @dataclass
@@ -60,21 +61,25 @@ def load_input_files(paths: Sequence[str | Path]) -> Dict[str, pd.DataFrame]:
     uploads = []
     for raw_path in paths:
         path = Path(raw_path)
-        uploads.append(_NamedBytesIO(path.read_bytes(), path.name))
+        uploads.append(NamedBytesIO(path.read_bytes(), path.name))
     tables, messages = core.parse_full_data_uploads(uploads)
-    errors = [message for message in messages if message.startswith("오류:")]
+    errors = [m for m in messages if str(m).startswith("오류:")]
     if errors:
         raise ValueError("\n".join(errors))
     return tables
 
 
-def load_input_directory(directory: str | Path) -> Dict[str, pd.DataFrame]:
-    root = Path(directory)
-    return load_input_files([root / name for name in core.REQUIRED_FILES if (root / name).exists()])
-
-
 def load_input_zip(path: str | Path) -> Dict[str, pd.DataFrame]:
     return load_input_files([Path(path)])
+
+
+def load_uploaded_bytes(files: Sequence[tuple[str, bytes]]) -> Dict[str, pd.DataFrame]:
+    uploads = [NamedBytesIO(payload, name) for name, payload in files]
+    tables, messages = core.parse_full_data_uploads(uploads)
+    errors = [m for m in messages if str(m).startswith("오류:")]
+    if errors:
+        raise ValueError("\n".join(errors))
+    return tables
 
 
 def validate_input(tables: Mapping[str, pd.DataFrame]) -> list[str]:
@@ -90,23 +95,37 @@ def default_country_map(
     active_item_ids: Sequence[str],
     production_mode: str,
 ) -> Dict[str, list[str]]:
-    catalog = tables["item_catalog.csv"]
     suppliers = tables["item_suppliers.csv"]
     processes = tables["stage2_item_processes.csv"]
     plants = tables["assembly_locations.csv"]
     order = plants["location_name"].astype(str).tolist()
     selected: Dict[str, list[str]] = {}
+
     for item_id in active_item_ids:
-        s1 = set(suppliers.loc[
-            (suppliers["item_id"].astype(str) == str(item_id))
-            & (pd.to_numeric(suppliers["active_default"], errors="coerce").fillna(0).astype(int) == 1),
-            "location_name",
-        ].astype(str))
-        s2 = set(processes.loc[
-            (processes["item_id"].astype(str) == str(item_id))
-            & (pd.to_numeric(processes["active_default"], errors="coerce").fillna(0).astype(int) == 1),
-            "location_name",
-        ].astype(str))
+        s1 = set(
+            suppliers.loc[
+                (suppliers["item_id"].astype(str) == str(item_id))
+                & (
+                    pd.to_numeric(suppliers["active_default"], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                    == 1
+                ),
+                "location_name",
+            ].astype(str)
+        )
+        s2 = set(
+            processes.loc[
+                (processes["item_id"].astype(str) == str(item_id))
+                & (
+                    pd.to_numeric(processes["active_default"], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                    == 1
+                ),
+                "location_name",
+            ].astype(str)
+        )
         if production_mode == "line":
             linked = [name for name in order if name in s1 and name in s2]
             selected[f"stage1::{item_id}"] = linked
@@ -114,6 +133,7 @@ def default_country_map(
         else:
             selected[f"stage1::{item_id}"] = [name for name in order if name in s1]
             selected[f"stage2::{item_id}"] = [name for name in order if name in s2]
+
     common = set(order)
     for item_id in active_item_ids:
         common &= set(selected.get(f"stage2::{item_id}", []))
@@ -121,7 +141,9 @@ def default_country_map(
     return selected
 
 
-def optimize(tables: Mapping[str, pd.DataFrame], request: OptimizationRequest) -> OptimizationResult:
+def optimize(
+    tables: Mapping[str, pd.DataFrame], request: OptimizationRequest
+) -> OptimizationResult:
     errors = validate_input(tables)
     if errors:
         raise ValueError("입력 데이터 검증 실패:\n- " + "\n- ".join(errors))
@@ -150,7 +172,8 @@ def optimize_all(
 ) -> Dict[Tuple[str, str], OptimizationResult]:
     active = list(active_item_ids or default_active_items(tables))
     maps = country_maps or {
-        mode: default_country_map(tables, active, mode) for mode in ("line", "modular")
+        mode: default_country_map(tables, active, mode)
+        for mode in ("line", "modular")
     }
     outputs: Dict[Tuple[str, str], OptimizationResult] = {}
     for scenario in ("S1", "S2", "S3"):
@@ -173,14 +196,22 @@ def result_to_zip_bytes(result: Mapping) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         frame_keys = [
-            "product_structure_summary", "product_summary", "production_summary",
-            "inbound_routes", "stage2_item_process_summary", "assembly_summary",
-            "module_summary", "market_routes",
+            "product_structure_summary",
+            "product_summary",
+            "production_summary",
+            "inbound_routes",
+            "stage2_item_process_summary",
+            "assembly_summary",
+            "module_summary",
+            "market_routes",
         ]
         for key in frame_keys:
             frame = result.get(key)
             if isinstance(frame, pd.DataFrame):
-                archive.writestr(f"{key}.csv", frame.to_csv(index=False).encode("utf-8-sig"))
+                archive.writestr(
+                    f"{key}.csv", frame.to_csv(index=False).encode("utf-8-sig")
+                )
+
         metadata = {}
         for key, value in result.items():
             if isinstance(value, pd.DataFrame):
@@ -203,7 +234,16 @@ def result_to_zip_bytes(result: Mapping) -> bytes:
 
 
 __all__ = [
-    "OptimizationRequest", "OptimizationResult", "load_input_files", "load_input_directory",
-    "load_input_zip", "validate_input", "default_active_items", "default_country_map",
-    "optimize", "optimize_all", "result_to_zip_bytes",
+    "NamedBytesIO",
+    "OptimizationRequest",
+    "OptimizationResult",
+    "load_input_files",
+    "load_input_zip",
+    "load_uploaded_bytes",
+    "validate_input",
+    "default_active_items",
+    "default_country_map",
+    "optimize",
+    "optimize_all",
+    "result_to_zip_bytes",
 ]
