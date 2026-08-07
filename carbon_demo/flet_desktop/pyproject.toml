@@ -1,0 +1,23 @@
+[project]
+name = "ev-carbon-optimizer-desktop"
+version = "1.0.0"
+description = "Offline Flet desktop GUI for EV supply-chain cost optimization under carbon constraints"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "flet==0.86.5",
+  "numpy==2.3.2",
+  "pandas==2.3.2",
+  "geopy==2.4.1",
+  "ortools==9.15.6755",
+]
+
+[tool.flet]
+org = "kr.evcarbon"
+product = "EV Carbon Optimizer"
+company = "EV Carbon Optimizer"
+copyright = "Copyright (C) 2026. All rights reserved."
+build_number = 1
+
+[tool.flet.app]
+path = "."
+module = "main.py"
