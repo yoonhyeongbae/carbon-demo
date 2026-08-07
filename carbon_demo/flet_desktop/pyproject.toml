@@ -1,10 +1,10 @@
 [project]
-name = "ev-carbon-optimizer-desktop"
-version = "1.0.0"
-description = "Offline Flet desktop GUI for EV supply-chain cost optimization under carbon constraints"
+name = "ev-carbon-optimizer-phase2"
+version = "0.2.0"
+description = "Phase-2 Flet desktop checkpoint for the EV carbon supply-chain optimizer"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-  "flet==0.86.5",
+  "flet==0.86.1",
   "numpy==2.3.2",
   "pandas==2.3.2",
   "geopy==2.4.1",
@@ -12,12 +12,13 @@ dependencies = [
 ]
 
 [tool.flet]
-org = "kr.evcarbon"
 product = "EV Carbon Optimizer"
 company = "EV Carbon Optimizer"
-copyright = "Copyright (C) 2026. All rights reserved."
-build_number = 1
+build_number = 2
 
 [tool.flet.app]
 path = "."
 module = "main.py"
+
+[tool.flet.windows]
+artifact = "EV_Carbon_Optimizer"
