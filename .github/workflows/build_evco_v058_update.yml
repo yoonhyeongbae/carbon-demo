@@ -18,7 +18,7 @@ jobs:
       - name: Install fonts and zip
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk zip
+          sudo apt-get install -y fonts-noto-cjk zip curl
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -33,13 +33,22 @@ jobs:
           python -m py_compile patches/v0.5.8/generate_technical_doc.py
       - name: Build update folder
         run: |
-          mkdir -p dist/update
+          mkdir -p dist/update/assets/natural_earth
           cp patches/v0.5.7/APPLY_V057_MAP_UI_PATCH.py dist/update/
           cp patches/v0.5.7/APPLY_V057_MAP_UI_PATCH.bat dist/update/ || true
           cp patches/v0.5.8/APPLY_V058_NATURAL_EARTH_PATCH.py dist/update/
           cp patches/v0.5.8/APPLY_V058_NATURAL_EARTH_PATCH.bat dist/update/
           cp patches/v0.5.8/natural_earth_map.py dist/update/
           cp patches/v0.5.8/README.md dist/update/README_v0.5.8.md
+          curl -L --fail --retry 3 -o /tmp/natural_earth.zip https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip
+          unzip -q /tmp/natural_earth.zip -d dist/update/assets/natural_earth
+          cat > dist/update/assets/natural_earth/NATURAL_EARTH_TERMS.txt <<'EOF'
+          Natural Earth Terms of Use
+          Official source: https://www.naturalearthdata.com/about/terms-of-use/
+          Data: Natural Earth Admin 0 - Countries, 1:110m, version 5.1.1
+          Official data page: https://www.naturalearthdata.com/downloads/110m-cultural-vectors/110m-admin-0-countries/
+          Natural Earth states that its raster and vector map data are public domain and may be modified, electronically disseminated, printed, and used for commercial purposes without permission or required attribution. EVCO displays 'Made with Natural Earth' for transparency.
+          EOF
           cat > dist/update/START_HERE_v0.5.8.txt <<'EOF'
           EV Carbon Optimizer v0.5.8 UPDATE
           =================================
@@ -53,6 +62,9 @@ jobs:
           3) Double-click APPLY_V058_NATURAL_EARTH_PATCH.bat.
           4) If the updater says Python is missing, run START_DEV.bat once and then rerun the updater.
           5) When PASS is shown, double-click START_DEV.bat.
+
+          Natural Earth country polygons are already bundled in this update ZIP,
+          so the installed supply-chain basemap does not need CARTO/OSM hosted tiles.
 
           v0.5.8 changes:
           - shared Stage 1 / Stage 1->2 / Stage 2 / Stage 2->3 result-map checkboxes
