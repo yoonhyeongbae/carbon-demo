@@ -1,0 +1,80 @@
+name: Build EVCO v0.5.8 update package
+
+on:
+  push:
+    branches:
+      - chatgpt/evco-v0.5.8-build
+    paths:
+      - 'patches/v0.5.8/**'
+      - 'patches/v0.5.7/**'
+      - '.github/workflows/build_evco_v058_update.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts and zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk zip
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install doc generator dependencies
+        run: pip install python-docx
+      - name: Syntax-check updater scripts
+        run: |
+          python -m py_compile patches/v0.5.7/APPLY_V057_MAP_UI_PATCH.py
+          python -m py_compile patches/v0.5.8/APPLY_V058_NATURAL_EARTH_PATCH.py
+          python -m py_compile patches/v0.5.8/natural_earth_map.py
+          python -m py_compile patches/v0.5.8/generate_technical_doc.py
+      - name: Build update folder
+        run: |
+          mkdir -p dist/update
+          cp patches/v0.5.7/APPLY_V057_MAP_UI_PATCH.py dist/update/
+          cp patches/v0.5.7/APPLY_V057_MAP_UI_PATCH.bat dist/update/ || true
+          cp patches/v0.5.8/APPLY_V058_NATURAL_EARTH_PATCH.py dist/update/
+          cp patches/v0.5.8/APPLY_V058_NATURAL_EARTH_PATCH.bat dist/update/
+          cp patches/v0.5.8/natural_earth_map.py dist/update/
+          cp patches/v0.5.8/README.md dist/update/README_v0.5.8.md
+          cat > dist/update/START_HERE_v0.5.8.txt <<'EOF'
+          EV Carbon Optimizer v0.5.8 UPDATE
+          =================================
+
+          Target:
+            EV_Carbon_Optimizer_v0.5.6_DEV_READY
+
+          1) Keep a backup of the complete v0.5.6 DEV_READY folder.
+          2) Extract every file from this UPDATE package directly into the project root,
+             the same folder that contains main.py and START_DEV.bat.
+          3) Double-click APPLY_V058_NATURAL_EARTH_PATCH.bat.
+          4) If the updater says Python is missing, run START_DEV.bat once and then rerun the updater.
+          5) When PASS is shown, double-click START_DEV.bat.
+
+          v0.5.8 changes:
+          - shared Stage 1 / Stage 1->2 / Stage 2 / Stage 2->3 result-map checkboxes
+          - shared active-material result-map checkboxes
+          - duplicate Scope proxy chart removed from Analysis
+          - CARTO/OpenStreetMap hosted tiles removed from the user-visible supply-chain map
+          - Natural Earth Admin-0 1:110m local public-domain vector basemap
+          - route geometry and arrow count reduced for smoother pan/zoom
+
+          The updater does not change the OR-Tools mathematical model or the 18 CSV meanings.
+          EOF
+      - name: Generate technical Word
+        run: python patches/v0.5.8/generate_technical_doc.py
+      - name: Zip update package
+        run: |
+          cd dist/update
+          zip -r ../EV_Carbon_Optimizer_v0.5.8_UPDATE.zip .
+      - name: Upload update artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EV_Carbon_Optimizer_v0.5.8_UPDATE
+          path: |
+            dist/EV_Carbon_Optimizer_v0.5.8_UPDATE.zip
+            dist/update/*
+          if-no-files-found: error
